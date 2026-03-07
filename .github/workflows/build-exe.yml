@@ -1,0 +1,53 @@
+name: Compilar RemesaPro.exe (Windows)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'process_remesa.py'
+      - 'RemesaPro.spec'
+      - '.github/workflows/build-exe.yml'
+  workflow_dispatch:   # Permite lanzarlo manualmente desde GitHub
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pandas pypdf openpyxl
+
+      - name: Compilar .exe con PyInstaller
+        run: |
+          pyinstaller RemesaPro.spec
+
+      - name: Subir .exe como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: RemesaPro-Windows
+          path: dist/RemesaPro.exe
+          retention-days: 30
+
+      - name: Crear Release automático
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "RemesaPro v${{ github.run_number }}"
+          body: |
+            🤖 Compilación automática desde commit `${{ github.sha }}`
+
+            **Cambios:** ${{ github.event.head_commit.message }}
+          files: dist/RemesaPro.exe
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
