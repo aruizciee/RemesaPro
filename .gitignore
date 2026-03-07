@@ -1,0 +1,31 @@
+# Ejecutables compilados (se generan con GitHub Actions)
+*.exe
+*.spec.bak
+dist/
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Config local (contiene rutas personales)
+remesa_config.json
+
+# Archivos de trabajo y datos sensibles
+*.xlsx
+*.pdf
+Informes/
+analysis_output*.txt
+analysis_result.txt
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Tests temporales
+TEST_REMESA_*.xlsx
+REMESA_GENERADA_*.xlsx

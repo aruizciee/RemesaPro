@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "RemesaPro",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["/Users/aruiz/Library/CloudStorage/OneDrive-CIEE/scripts/Remesa_proyecto/process_remesa.py"],
+      "port": 0,
+      "autoPort": true
+    }
+  ]
+}
