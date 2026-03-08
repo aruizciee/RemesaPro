@@ -550,7 +550,12 @@ def extract_info_from_excel(xlsx_path, db_df):
         total_cell = ws['J56'].value
         if total_cell is not None:
             try:
-                amount = float(str(total_cell).replace('.', '').replace(',', '.'))
+                # openpyxl returns Python float for numeric cells — use directly
+                if isinstance(total_cell, (int, float)):
+                    amount = float(total_cell)
+                else:
+                    # String with European format (e.g. "1.234,56") — strip thousands, fix decimal
+                    amount = float(str(total_cell).replace('.', '').replace(',', '.'))
             except:
                 pass
 
@@ -563,7 +568,10 @@ def extract_info_from_excel(xlsx_path, db_df):
                             adj = ws.cell(row=cell.row, column=cell.column + offset)
                             if adj.value is not None:
                                 try:
-                                    amount = float(str(adj.value).replace('.', '').replace(',', '.'))
+                                    if isinstance(adj.value, (int, float)):
+                                        amount = float(adj.value)
+                                    else:
+                                        amount = float(str(adj.value).replace('.', '').replace(',', '.'))
                                     break
                                 except:
                                     pass
