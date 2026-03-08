@@ -22,6 +22,9 @@ Informes/
 analysis_output*.txt
 analysis_result.txt
 
+# Token GitHub (NUNCA subir al repositorio)
+.github_token
+
 # Sistema
 .DS_Store
 Thumbs.db
