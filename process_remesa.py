@@ -20,6 +20,46 @@ OUTPUT_PREFIX = "REMESA_GENERADA_"
 CONFIG_FILE = "remesa_config.json"
 LOGO_FILE = "ciee logo.png"
 
+def parse_amount(value):
+    """
+    Parse a numeric value from Excel cell or PDF text string.
+    Handles all separator combinations:
+      - 28.92      → 28.92  (punto = decimal)
+      - 28,92      → 28.92  (coma = decimal)
+      - 1.234,56   → 1234.56 (punto = miles, coma = decimal)
+      - 1,234.56   → 1234.56 (coma = miles, punto = decimal)
+    Rule: when both separators are present, the rightmost one is the decimal.
+    """
+    if value is None:
+        return 0.0
+    # Already a numeric type (e.g. openpyxl float) — use directly
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip().replace(' ', '').replace('€', '').replace('$', '')
+    if not s:
+        return 0.0
+    has_comma = ',' in s
+    has_dot   = '.' in s
+    if has_comma and has_dot:
+        # Both present: rightmost separator is the decimal
+        if s.rfind(',') > s.rfind('.'):
+            # European: 1.234,56
+            return float(s.replace('.', '').replace(',', '.'))
+        else:
+            # US: 1,234.56
+            return float(s.replace(',', ''))
+    elif has_comma:
+        # Only comma: decimal if ≤2 digits follow it, thousands otherwise
+        after_comma = s.split(',')[-1]
+        if len(after_comma) <= 2:
+            return float(s.replace(',', '.'))   # 28,92 → 28.92
+        else:
+            return float(s.replace(',', ''))    # 1,234 → 1234
+    else:
+        # Only dot or no separator — standard float
+        return float(s)                         # 28.92 → 28.92
+
+
 def normalize_text(text):
     """
     Normalize text:
@@ -547,17 +587,10 @@ def extract_info_from_excel(xlsx_path, db_df):
 
         # 1. Amount: Fixed cell J56 (standard template)
         amount = 0.0
-        total_cell = ws['J56'].value
-        if total_cell is not None:
-            try:
-                # openpyxl returns Python float for numeric cells — use directly
-                if isinstance(total_cell, (int, float)):
-                    amount = float(total_cell)
-                else:
-                    # String with European format (e.g. "1.234,56") — strip thousands, fix decimal
-                    amount = float(str(total_cell).replace('.', '').replace(',', '.'))
-            except:
-                pass
+        try:
+            amount = parse_amount(ws['J56'].value)
+        except:
+            pass
 
         # Fallback: search for "Cantidad total" label and read adjacent cell to the right
         if amount == 0.0:
@@ -568,11 +601,9 @@ def extract_info_from_excel(xlsx_path, db_df):
                             adj = ws.cell(row=cell.row, column=cell.column + offset)
                             if adj.value is not None:
                                 try:
-                                    if isinstance(adj.value, (int, float)):
-                                        amount = float(adj.value)
-                                    else:
-                                        amount = float(str(adj.value).replace('.', '').replace(',', '.'))
-                                    break
+                                    amount = parse_amount(adj.value)
+                                    if amount != 0.0:
+                                        break
                                 except:
                                     pass
                         break
@@ -609,13 +640,12 @@ def extract_info_from_pdf(pdf_path, db_df):
         text = first_page.extract_text()
         
         # 1. Amount
-        # Regex handles European format (1.234,56) and simple format (234,56 or 234.56)
+        # Regex captures: European (1.234,56), comma-decimal (28,92), dot-decimal (28.92)
         amount = 0.0
-        matches = re.finditer(r"(\d+(?:\.\d{3})*,\d{2}|\d+\.\d{2})", text)
+        matches = re.finditer(r"(\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|\d+[.,]\d{2})", text)
         candidates = []
         for m in matches:
-            val_str = m.group(1).replace('.', '').replace(',', '.')
-            try: candidates.append((m.start(), float(val_str)))
+            try: candidates.append((m.start(), parse_amount(m.group(1))))
             except: pass
         
         total_idx = text.lower().find("cantidad total")
