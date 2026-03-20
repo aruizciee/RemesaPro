@@ -12,6 +12,7 @@ import threading
 import sys
 import json
 import unicodedata
+from xml.etree.ElementTree import Element, SubElement, ElementTree, indent
 
 # Configuration defaults
 DEFAULT_DB_FILE = "Base datos IBAN proveedores.xlsx"
@@ -19,6 +20,19 @@ TEMPLATE_FILE = "FA25_REMESA PAGOS SANTANDER_.xlsx"
 OUTPUT_PREFIX = "REMESA_GENERADA_"
 CONFIG_FILE = "remesa_config.json"
 LOGO_FILE = "ciee logo.png"
+
+# SEPA debtor defaults (CIEE)
+SEPA_DEFAULTS = {
+    "sepa_nombre": "",
+    "sepa_cif": "",
+    "sepa_iban": "",
+    "sepa_bic": "",
+    "sepa_direccion": "",
+    "sepa_cp": "",
+    "sepa_ciudad": "",
+    "sepa_provincia": "",
+    "sepa_pais": "ES",
+}
 
 def parse_amount(value):
     """
@@ -147,6 +161,174 @@ class AmbiguityResolverDialog(tk.Toplevel):
             self.callback(self.selected_name, self.selected_iban)
         
         self.destroy()
+
+class SepaConfigDialog(tk.Toplevel):
+    """Dialog to configure SEPA debtor (ordenante) details."""
+    def __init__(self, parent, config, save_callback):
+        super().__init__(parent)
+        self.title("Configuración SEPA - Datos del Ordenante")
+        self.geometry("550x400")
+        self.save_callback = save_callback
+
+        tk.Label(self, text="Datos del Ordenante (Empresa)", font=("Helvetica", 12, "bold")).pack(pady=10)
+
+        form = tk.Frame(self)
+        form.pack(fill=tk.X, padx=20, pady=5)
+
+        fields = [
+            ("Nombre empresa:", "sepa_nombre"),
+            ("CIF/NIF:", "sepa_cif"),
+            ("IBAN:", "sepa_iban"),
+            ("BIC/SWIFT:", "sepa_bic"),
+            ("Dirección:", "sepa_direccion"),
+            ("Código Postal:", "sepa_cp"),
+            ("Ciudad:", "sepa_ciudad"),
+            ("Provincia:", "sepa_provincia"),
+            ("País (ISO):", "sepa_pais"),
+        ]
+
+        self.vars = {}
+        for i, (label, key) in enumerate(fields):
+            tk.Label(form, text=label, anchor="w").grid(row=i, column=0, sticky="w", pady=3)
+            var = tk.StringVar(value=config.get(key, SEPA_DEFAULTS.get(key, "")))
+            width = 50 if key in ("sepa_nombre", "sepa_direccion", "sepa_iban") else 30
+            tk.Entry(form, textvariable=var, width=width).grid(row=i, column=1, pady=3, padx=5)
+            self.vars[key] = var
+
+        btn_frame = tk.Frame(self)
+        btn_frame.pack(pady=15)
+        tk.Button(btn_frame, text="💾 Guardar", command=self.save, bg="#c8e6c9",
+                  font=("Helvetica", 10, "bold")).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Cancelar", command=self.destroy).pack(side=tk.LEFT, padx=5)
+
+    def save(self):
+        result = {key: var.get() for key, var in self.vars.items()}
+        if self.save_callback:
+            self.save_callback(result)
+        self.destroy()
+
+
+def generate_sepa_xml(results, config, output_path=None):
+    """Generate SEPA Credit Transfer XML (pain.001.001.03) from remesa results."""
+    # Filter only valid transactions (with IBAN)
+    valid = [r for r in results
+             if r['IBAN'] and r['IBAN'] not in ('NO ENCONTRADO', 'AMBIGUO', '')]
+
+    if not valid:
+        return None
+
+    now = datetime.now()
+    msg_id = now.strftime("%Y%m%d%H%M%S")
+    nb_txs = str(len(valid))
+    ctrl_sum = f"{sum(r['IMPORTE'] for r in valid):.2f}"
+
+    # Get config values with defaults
+    cfg = {**SEPA_DEFAULTS, **{k: v for k, v in config.items() if k.startswith("sepa_")}}
+
+    ns = "urn:iso:std:iso:20022:tech:xsd:pain.001.001.03"
+    doc = Element("Document", xmlns=ns)
+    root = SubElement(doc, "CstmrCdtTrfInitn")
+
+    # --- Group Header ---
+    grp = SubElement(root, "GrpHdr")
+    SubElement(grp, "MsgId").text = msg_id
+    SubElement(grp, "CreDtTm").text = now.strftime("%Y-%m-%dT%H:%M:%S")
+    SubElement(grp, "NbOfTxs").text = nb_txs
+    SubElement(grp, "CtrlSum").text = ctrl_sum
+    initg = SubElement(grp, "InitgPty")
+    SubElement(initg, "Nm").text = cfg["sepa_nombre"]
+    org_id = SubElement(SubElement(SubElement(initg, "Id"), "OrgId"), "Othr")
+    SubElement(org_id, "Id").text = cfg["sepa_cif"]
+
+    # --- Payment Information ---
+    pmt = SubElement(root, "PmtInf")
+    SubElement(pmt, "PmtInfId").text = f"{msg_id}-1"
+    SubElement(pmt, "PmtMtd").text = "TRF"
+    SubElement(pmt, "BtchBookg").text = "false"
+    SubElement(pmt, "NbOfTxs").text = nb_txs
+    SubElement(pmt, "CtrlSum").text = ctrl_sum
+
+    svc = SubElement(SubElement(pmt, "PmtTpInf"), "SvcLvl")
+    SubElement(svc, "Cd").text = "SEPA"
+
+    SubElement(pmt, "ReqdExctnDt").text = now.strftime("%Y-%m-%d")
+
+    # Debtor
+    dbtr = SubElement(pmt, "Dbtr")
+    SubElement(dbtr, "Nm").text = cfg["sepa_nombre"]
+    addr = SubElement(dbtr, "PstlAdr")
+    SubElement(addr, "PstCd").text = cfg["sepa_cp"]
+    SubElement(addr, "TwnNm").text = cfg["sepa_ciudad"]
+    SubElement(addr, "CtrySubDvsn").text = cfg["sepa_provincia"]
+    SubElement(addr, "Ctry").text = cfg["sepa_pais"]
+    SubElement(addr, "AdrLine").text = cfg["sepa_direccion"]
+    dbtr_org = SubElement(SubElement(SubElement(dbtr, "Id"), "OrgId"), "Othr")
+    SubElement(dbtr_org, "Id").text = cfg["sepa_cif"]
+
+    # Debtor Account
+    dbtr_acct = SubElement(pmt, "DbtrAcct")
+    SubElement(SubElement(dbtr_acct, "Id"), "IBAN").text = cfg["sepa_iban"]
+    SubElement(dbtr_acct, "Ccy").text = "EUR"
+
+    # Debtor Agent (Bank)
+    dbtr_agt = SubElement(pmt, "DbtrAgt")
+    SubElement(SubElement(dbtr_agt, "FinInstnId"), "BIC").text = cfg["sepa_bic"]
+
+    SubElement(pmt, "ChrgBr").text = "SLEV"
+
+    # --- Credit Transfer Transactions ---
+    for i, r in enumerate(valid, 1):
+        tx = SubElement(pmt, "CdtTrfTxInf")
+
+        pmt_id = SubElement(tx, "PmtId")
+        end2end = f"{msg_id}{i:02d}"
+        SubElement(pmt_id, "InstrId").text = end2end
+        SubElement(pmt_id, "EndToEndId").text = end2end
+
+        amt = SubElement(tx, "Amt")
+        instd = SubElement(amt, "InstdAmt", Ccy="EUR")
+        instd.text = f"{r['IMPORTE']:.2f}"
+
+        cdtr = SubElement(tx, "Cdtr")
+        # Clean name: remove prefixes like "REVISAR: AMBIGUO: ..."
+        clean_name = r['NOMBRE']
+        for prefix in ("REVISAR: ", "AMBIGUO: "):
+            if clean_name.startswith(prefix):
+                clean_name = clean_name[len(prefix):]
+        SubElement(cdtr, "Nm").text = clean_name[:70]  # SEPA max 70 chars
+
+        cdtr_addr = SubElement(cdtr, "PstlAdr")
+        # Derive country from IBAN prefix (first 2 chars)
+        iban = r['IBAN'].replace(" ", "")
+        country = iban[:2].upper() if len(iban) >= 2 else cfg["sepa_pais"]
+        SubElement(cdtr_addr, "Ctry").text = country
+
+        cdtr_acct = SubElement(tx, "CdtrAcct")
+        SubElement(SubElement(cdtr_acct, "Id"), "IBAN").text = iban
+
+        rmt = SubElement(tx, "RmtInf")
+        concept = r.get('CONCEPTO_NORMA', f"Pago-CIEE")
+        SubElement(rmt, "Ustrd").text = concept[:140]  # SEPA max 140 chars
+
+    # Write XML
+    if output_path is None:
+        timestamp = now.strftime("%Y%m%d_%H%M%S")
+        output_path = f"REMESA_SEPA_{timestamp}.xml"
+
+    tree = ElementTree(doc)
+    indent(tree, space="  ")
+    tree.write(output_path, encoding="UTF-8", xml_declaration=True)
+
+    # Add standalone="no" attribute (standard SEPA requirement)
+    with open(output_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    content = content.replace("<?xml version='1.0' encoding='UTF-8'?>",
+                              '<?xml version="1.0" encoding="UTF-8" standalone="no"?>')
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+    return output_path
+
 
 class EditDialog(tk.Toplevel):
     def __init__(self, parent, result_data, db_df, save_callback):
@@ -287,7 +469,12 @@ class RemesaApp:
         
         self.btn_save = ttk.Button(btn_frame, text="💾 2. Guardar Excel", command=self.save_results, state="disabled")
         self.btn_save.pack(side=tk.LEFT, padx=5)
-        
+
+        self.btn_sepa = ttk.Button(btn_frame, text="🏦 3. Generar SEPA XML", command=self.generate_sepa, state="disabled")
+        self.btn_sepa.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(btn_frame, text="⚙ SEPA Config", command=self.open_sepa_config).pack(side=tk.LEFT, padx=5)
+
         self.lbl_status = ttk.Label(btn_frame, text="Listo", font=("Helvetica", 9, "italic"))
         self.lbl_status.pack(side=tk.LEFT, padx=15)
         
@@ -451,6 +638,7 @@ class RemesaApp:
     def start_processing_thread(self):
         self.btn_process.config(state="disabled")
         self.btn_save.config(state="disabled")
+        self.btn_sepa.config(state="disabled")
         self.lbl_status.config(text="Procesando...")
         self.tree.delete(*self.tree.get_children())
         self.current_results = []
@@ -531,6 +719,7 @@ class RemesaApp:
             visible_count += 1
         
         self.btn_save.config(state="normal")
+        self.btn_sepa.config(state="normal")
         
         # Update status with counts
         if filter_problems:
@@ -549,6 +738,39 @@ class RemesaApp:
                 messagebox.showinfo("Éxito", f"Guardado:\n{output_file}")
         except Exception as e:
             messagebox.showerror("Error", str(e))
+
+    def generate_sepa(self):
+        if not self.current_results: return
+
+        # Check for problems
+        problems = [r for r in self.current_results
+                    if r['IBAN'] in ('NO ENCONTRADO', 'AMBIGUO', '')]
+        if problems:
+            resp = messagebox.askyesno(
+                "Atención",
+                f"Hay {len(problems)} registro(s) sin IBAN válido que se omitirán del XML.\n\n"
+                "¿Deseas continuar generando el SEPA XML solo con los registros válidos?")
+            if not resp:
+                return
+
+        try:
+            output_file = generate_sepa_xml(self.current_results, self.config)
+            if output_file:
+                messagebox.showinfo("SEPA XML Generado",
+                    f"Archivo SEPA generado correctamente:\n{output_file}\n\n"
+                    f"Transacciones incluidas: {len([r for r in self.current_results if r['IBAN'] not in ('NO ENCONTRADO', 'AMBIGUO', '')])}")
+            else:
+                messagebox.showwarning("Aviso", "No hay transacciones válidas para generar el XML.")
+        except Exception as e:
+            messagebox.showerror("Error SEPA", f"Error generando XML: {e}")
+
+    def open_sepa_config(self):
+        def on_save(sepa_data):
+            self.config.update(sepa_data)
+            self.save_config()
+            messagebox.showinfo("Config SEPA", "Configuración SEPA guardada.")
+
+        SepaConfigDialog(self.root, self.config, on_save)
 
 # --- Logic ---
 
