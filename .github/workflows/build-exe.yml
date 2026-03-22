@@ -19,6 +19,11 @@ jobs:
       - name: Descargar código
         uses: actions/checkout@v4
 
+      - name: Inyectar versión (build number)
+        shell: bash
+        run: |
+          sed -i "s/^APP_VERSION = .*/APP_VERSION = ${{ github.run_number }}/" process_remesa.py
+
       - name: Configurar Python 3.13
         uses: actions/setup-python@v5
         with:
@@ -48,6 +53,10 @@ jobs:
     steps:
       - name: Descargar código
         uses: actions/checkout@v4
+
+      - name: Inyectar versión (build number)
+        run: |
+          sed -i '' "s/^APP_VERSION = .*/APP_VERSION = ${{ github.run_number }}/" process_remesa.py
 
       - name: Configurar Python 3.13
         uses: actions/setup-python@v5
