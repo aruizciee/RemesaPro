@@ -12,7 +12,12 @@ import threading
 import sys
 import json
 import unicodedata
+import platform
+import subprocess
+from urllib import request as urllib_request
 from xml.etree.ElementTree import Element, SubElement, ElementTree, indent
+
+APP_VERSION = 7  # Matches GitHub build number
 
 # Configuration defaults
 DEFAULT_DB_FILE = "Base datos IBAN proveedores.xlsx"
@@ -404,6 +409,91 @@ class EditDialog(tk.Toplevel):
         
         self.destroy()
 
+
+# ── Auto-update ───────────────────────────────────────────────────────────
+GITHUB_REPO = "aruizciee/RemesaPro"
+GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+
+def check_for_updates():
+    """Check GitHub for a newer release. Returns (new_version, download_url) or None."""
+    try:
+        req = urllib_request.Request(GITHUB_API_LATEST, headers={"Accept": "application/vnd.github+json"})
+        with urllib_request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+        tag = data.get("tag_name", "")  # e.g. "build-8"
+        remote_version = int(tag.replace("build-", "")) if tag.startswith("build-") else 0
+        if remote_version <= APP_VERSION:
+            return None
+        # Pick the right asset for this OS
+        is_mac = platform.system() == "Darwin"
+        suffix = "macOS.zip" if is_mac else ".exe"
+        for asset in data.get("assets", []):
+            if asset["name"].endswith(suffix):
+                return (remote_version, asset["browser_download_url"], asset["name"])
+        return None
+    except Exception:
+        return None
+
+
+def download_and_apply_update(download_url, asset_name, status_callback=None):
+    """Download the new version and replace the current executable."""
+    try:
+        if status_callback:
+            status_callback("Descargando actualización...")
+
+        # Download to temp location
+        import tempfile
+        tmp_dir = tempfile.mkdtemp()
+        tmp_file = os.path.join(tmp_dir, asset_name)
+        urllib_request.urlretrieve(download_url, tmp_file)
+
+        current_exe = sys.executable  # Path of the running .exe / binary
+        is_mac = platform.system() == "Darwin"
+
+        if is_mac:
+            # macOS: unzip and replace the .app or binary
+            import zipfile
+            with zipfile.ZipFile(tmp_file, 'r') as zf:
+                zf.extractall(tmp_dir)
+            # Find the extracted binary
+            extracted = os.path.join(tmp_dir, "RemesaPro")
+            if not os.path.exists(extracted):
+                # Look for it inside .app bundle
+                app_binary = os.path.join(tmp_dir, "RemesaPro.app", "Contents", "MacOS", "RemesaPro")
+                if os.path.exists(app_binary):
+                    extracted = app_binary
+            if os.path.exists(extracted):
+                os.chmod(extracted, 0o755)
+                backup = current_exe + ".old"
+                if os.path.exists(backup):
+                    os.remove(backup)
+                os.rename(current_exe, backup)
+                import shutil
+                shutil.copy2(extracted, current_exe)
+                os.chmod(current_exe, 0o755)
+        else:
+            # Windows: rename current exe, move new one in place
+            backup = current_exe + ".old"
+            if os.path.exists(backup):
+                os.remove(backup)
+            os.rename(current_exe, backup)
+            import shutil
+            shutil.copy2(tmp_file, current_exe)
+
+        # Clean up temp
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        if status_callback:
+            status_callback("Actualización completada")
+        return True
+    except Exception as e:
+        if status_callback:
+            status_callback(f"Error al actualizar: {e}")
+        return False
+
+
 class RemesaApp:
     def __init__(self, root):
         self.root = root
@@ -441,6 +531,12 @@ class RemesaApp:
         except Exception: pass
 
         ttk.Label(header_frame, text="Generador de Remesas", style="Header.TLabel").pack(side=tk.LEFT, padx=10)
+
+        # Version label + update button in header
+        self.version_label = ttk.Label(header_frame, text=f"v{APP_VERSION}", font=("Helvetica", 8), foreground="gray")
+        self.version_label.pack(side=tk.RIGHT, padx=5)
+        self.btn_update = ttk.Button(header_frame, text="🔄 Buscar actualizaciones", command=self.check_updates_manual)
+        self.btn_update.pack(side=tk.RIGHT, padx=5)
 
         # Main Container
         main_frame = ttk.Frame(root, padding="15")
@@ -529,6 +625,76 @@ class RemesaApp:
         
         self.current_results = []
         self.loaded_db_df = None # Store loaded DB in memory
+
+        # Check for updates on startup (in background thread)
+        threading.Thread(target=self._auto_check_updates, daemon=True).start()
+
+    def _auto_check_updates(self):
+        """Background check on startup — non-intrusive."""
+        result = check_for_updates()
+        if result:
+            new_ver, url, name = result
+            self.root.after(0, lambda: self._prompt_update(new_ver, url, name))
+
+    def _prompt_update(self, new_ver, url, name):
+        """Show update dialog."""
+        self.version_label.config(text=f"v{APP_VERSION} (nueva: v{new_ver})", foreground="red")
+        resp = messagebox.askyesno(
+            "Actualización disponible",
+            f"Hay una nueva versión de RemesaPro (v{new_ver}).\n"
+            f"Tu versión actual es v{APP_VERSION}.\n\n"
+            f"¿Deseas actualizar ahora?",
+            parent=self.root
+        )
+        if resp:
+            self._do_update(url, name, new_ver)
+
+    def check_updates_manual(self):
+        """Manual check triggered by button click."""
+        self.lbl_status.config(text="Comprobando actualizaciones...")
+        self.root.update()
+        result = check_for_updates()
+        if result:
+            new_ver, url, name = result
+            self._prompt_update(new_ver, url, name)
+        else:
+            self.lbl_status.config(text="Listo")
+            messagebox.showinfo("Sin actualizaciones",
+                                f"Ya tienes la última versión (v{APP_VERSION}).",
+                                parent=self.root)
+
+    def _do_update(self, url, name, new_ver):
+        """Download and apply the update."""
+        def status_cb(msg):
+            self.root.after(0, lambda: self.lbl_status.config(text=msg))
+
+        def run():
+            success = download_and_apply_update(url, name, status_cb)
+            if success:
+                self.root.after(0, lambda: self._restart_after_update(new_ver))
+            else:
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Error", "No se pudo actualizar. Inténtalo de nuevo.", parent=self.root))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _restart_after_update(self, new_ver):
+        """Prompt user to restart the app after successful update."""
+        self.version_label.config(text=f"v{new_ver} ✓", foreground="green")
+        resp = messagebox.askyesno(
+            "Actualización completada",
+            f"RemesaPro se ha actualizado a v{new_ver}.\n"
+            f"¿Reiniciar ahora?",
+            parent=self.root
+        )
+        if resp:
+            # Restart the application
+            exe = sys.executable
+            if getattr(sys, 'frozen', False):
+                # PyInstaller frozen app
+                os.execv(exe, [exe])
+            else:
+                os.execv(sys.executable, [sys.executable] + sys.argv)
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
