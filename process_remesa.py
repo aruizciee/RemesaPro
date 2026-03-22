@@ -1028,15 +1028,29 @@ def extract_info_from_pdf(pdf_path, db_df):
         text = first_page.extract_text()
         
         # 1. Amount
-        # Regex captures: European (1.234,56), comma-decimal (28,92), dot-decimal (28.92)
+        # Regex captures amounts with/without decimals: 1.234,56 | 28,92 | 28.92 | 23 €
         amount = 0.0
-        matches = re.finditer(r"(\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|\d+[.,]\d{2})", text)
+        # Pattern for amounts with decimals
+        decimal_matches = re.finditer(r"(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})", text)
         candidates = []
-        for m in matches:
+        for m in decimal_matches:
             try: candidates.append((m.start(), parse_amount(m.group(1))))
             except: pass
-        
-        total_idx = text.lower().find("cantidad total")
+        # Pattern for whole-number amounts followed by € (e.g. "23 €")
+        whole_matches = re.finditer(r"(\d+)\s*€", text)
+        for m in whole_matches:
+            try: candidates.append((m.start(), float(m.group(1))))
+            except: pass
+
+        # Search for total label — support multiple formats
+        total_labels = ["total gastos", "cantidad total", "total"]
+        total_idx = -1
+        for label in total_labels:
+            idx = text.lower().find(label)
+            if idx != -1:
+                total_idx = idx
+                break
+
         if total_idx != -1:
             closest_val = None
             min_dist = 1000
@@ -1049,14 +1063,26 @@ def extract_info_from_pdf(pdf_path, db_df):
         else:
              amount = max([c[1] for c in candidates]) if candidates else 0.0
 
-        # 2. Name - New Logic (Accent Insensitive)
+        # 2. Name - Extract from filename and/or PDF content
         filename = os.path.basename(pdf_path)
         name_from_file = None
+
+        # Try filename first: "SP26_ALBERTO RUIZ_compras en supersol.pdf"
         parts = filename.split('_')
         if len(parts) >= 2:
             candidate = parts[1]
             if len(candidate) > 2 and not candidate.isdigit():
                 name_from_file = candidate.replace('.', ' ').strip().upper()
+
+        # Fallback: extract from "Nombre: XXX" inside the PDF (new expense report format)
+        if not name_from_file:
+            name_match = re.search(r"[Nn]ombre:\s*(.+)", text)
+            if name_match:
+                extracted = name_match.group(1).strip().upper()
+                # Clean up: stop at newline or next field label
+                extracted = re.split(r"\n|Fecha:|Semestre:", extracted)[0].strip()
+                if len(extracted) > 2:
+                    name_from_file = extracted
 
         db_names = db_df['NOMBRE'].dropna().astype(str).tolist()
         
