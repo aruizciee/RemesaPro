@@ -26,7 +26,7 @@ OUTPUT_PREFIX = "REMESA_GENERADA_"
 CONFIG_FILE = "remesa_config.json"
 LOGO_FILE = "ciee logo.png"
 
-# SEPA debtor defaults (CIEE)
+# SEPA debtor fields (values loaded from local remesa_config.json, never from code)
 SEPA_DEFAULTS = {
     "sepa_nombre": "",
     "sepa_cif": "",
