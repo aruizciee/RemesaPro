@@ -416,23 +416,30 @@ GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest
 
 
 def check_for_updates():
-    """Check GitHub for a newer release. Returns (new_version, download_url) or None."""
+    """Check GitHub for a newer release. Returns (new_version, download_url, asset_name) or None."""
     try:
-        req = urllib_request.Request(GITHUB_API_LATEST, headers={"Accept": "application/vnd.github+json"})
-        with urllib_request.urlopen(req, timeout=5) as resp:
+        req = urllib_request.Request(GITHUB_API_LATEST, headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "RemesaPro-Updater"
+        })
+        with urllib_request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode())
         tag = data.get("tag_name", "")  # e.g. "build-8"
         remote_version = int(tag.replace("build-", "")) if tag.startswith("build-") else 0
+        print(f"[Updater] Local: v{APP_VERSION}, Remote: v{remote_version} (tag: {tag})")
         if remote_version <= APP_VERSION:
             return None
         # Pick the right asset for this OS
         is_mac = platform.system() == "Darwin"
         suffix = "macOS.zip" if is_mac else ".exe"
         for asset in data.get("assets", []):
+            print(f"[Updater] Asset: {asset['name']}")
             if asset["name"].endswith(suffix):
                 return (remote_version, asset["browser_download_url"], asset["name"])
+        print(f"[Updater] No matching asset found for {'macOS' if is_mac else 'Windows'}")
         return None
-    except Exception:
+    except Exception as e:
+        print(f"[Updater] Error checking for updates: {e}")
         return None
 
 
@@ -653,15 +660,21 @@ class RemesaApp:
         """Manual check triggered by button click."""
         self.lbl_status.config(text="Comprobando actualizaciones...")
         self.root.update()
-        result = check_for_updates()
-        if result:
-            new_ver, url, name = result
-            self._prompt_update(new_ver, url, name)
-        else:
-            self.lbl_status.config(text="Listo")
-            messagebox.showinfo("Sin actualizaciones",
-                                f"Ya tienes la última versión (v{APP_VERSION}).",
-                                parent=self.root)
+        try:
+            result = check_for_updates()
+            if result:
+                new_ver, url, name = result
+                self._prompt_update(new_ver, url, name)
+            else:
+                self.lbl_status.config(text="Listo")
+                messagebox.showinfo("Sin actualizaciones",
+                                    f"Ya tienes la última versión (v{APP_VERSION}).\n\n"
+                                    f"Repo: {GITHUB_REPO}\nAPI: {GITHUB_API_LATEST}",
+                                    parent=self.root)
+        except Exception as e:
+            self.lbl_status.config(text="Error al comprobar")
+            messagebox.showerror("Error", f"No se pudo comprobar actualizaciones:\n{e}",
+                                 parent=self.root)
 
     def _do_update(self, url, name, new_ver):
         """Download and apply the update."""
