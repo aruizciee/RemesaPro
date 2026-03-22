@@ -530,7 +530,7 @@ class RemesaApp:
             lbl_logo.pack(side=tk.LEFT, padx=10)
         except Exception: pass
 
-        ttk.Label(header_frame, text="Generador de Remesas", style="Header.TLabel").pack(side=tk.LEFT, padx=10)
+        ttk.Label(header_frame, text="RemesaPro - Generador de Remesas", style="Header.TLabel").pack(side=tk.LEFT, padx=10)
 
         # Version label + update button in header
         self.version_label = ttk.Label(header_frame, text=f"v{APP_VERSION}", font=("Helvetica", 8), foreground="gray")
