@@ -1076,26 +1076,33 @@ def extract_info_from_pdf(pdf_path, db_df):
         else:
              amount = max([c[1] for c in candidates]) if candidates else 0.0
 
-        # 2. Name - Extract from filename and/or PDF content
+        # 2. Name - Extract from PDF content first (most reliable), then filename
         filename = os.path.basename(pdf_path)
+        name_from_pdf = None
         name_from_file = None
 
-        # Try filename first: "SP26_ALBERTO RUIZ_compras en supersol.pdf"
-        parts = filename.split('_')
+        # Priority 1: "Nombre: XXX" inside the PDF (expense report format)
+        name_match = re.search(r"[Nn]ombre:\s*(.+)", text)
+        if name_match:
+            extracted = name_match.group(1).strip().upper()
+            # Clean up: stop at newline or next field label
+            extracted = re.split(r"\n|Fecha:|Semestre:|Programa", extracted)[0].strip()
+            if len(extracted) > 2:
+                name_from_pdf = extracted
+
+        # Priority 2: Filename patterns
+        #   "SP26_ALBERTO RUIZ_compras en supersol.pdf"
+        #   "ALBERTO RUIZ - informe gastos.pdf"
+        #   "informe_ALBERTO RUIZ.pdf"
+        parts = filename.replace('.pdf', '').replace('.PDF', '').split('_')
         if len(parts) >= 2:
-            candidate = parts[1]
+            # Try second part (most common: SEMESTER_NAME_description)
+            candidate = parts[1].strip()
             if len(candidate) > 2 and not candidate.isdigit():
                 name_from_file = candidate.replace('.', ' ').strip().upper()
 
-        # Fallback: extract from "Nombre: XXX" inside the PDF (new expense report format)
-        if not name_from_file:
-            name_match = re.search(r"[Nn]ombre:\s*(.+)", text)
-            if name_match:
-                extracted = name_match.group(1).strip().upper()
-                # Clean up: stop at newline or next field label
-                extracted = re.split(r"\n|Fecha:|Semestre:", extracted)[0].strip()
-                if len(extracted) > 2:
-                    name_from_file = extracted
+        # Use PDF name if available, otherwise filename
+        name_from_file = name_from_pdf or name_from_file
 
         db_names = db_df['NOMBRE'].dropna().astype(str).tolist()
         
