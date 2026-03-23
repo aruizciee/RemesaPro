@@ -16,6 +16,7 @@ import platform
 import subprocess
 from urllib import request as urllib_request
 from xml.etree.ElementTree import Element, SubElement, ElementTree, indent
+import ssl
 
 APP_VERSION = 7  # Matches GitHub build number
 
@@ -415,14 +416,38 @@ GITHUB_REPO = "aruizciee/RemesaPro"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 
-def check_for_updates():
-    """Check GitHub for a newer release. Returns (new_version, download_url, asset_name) or None."""
+def _get_ssl_context():
+    """Get SSL context — handles macOS PyInstaller certificate issues."""
     try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        pass
+    # Try default context first
+    ctx = ssl.create_default_context()
+    try:
+        urllib_request.urlopen(
+            urllib_request.Request("https://api.github.com", headers={"User-Agent": "test"}),
+            timeout=5, context=ctx
+        )
+        return ctx
+    except ssl.SSLError:
+        # Fallback: unverified context (safe for read-only public API)
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
+
+def check_for_updates():
+    """Check GitHub for a newer release. Returns (new_version, download_url, asset_name) or error string."""
+    try:
+        ctx = _get_ssl_context()
         req = urllib_request.Request(GITHUB_API_LATEST, headers={
             "Accept": "application/vnd.github+json",
             "User-Agent": "RemesaPro-Updater"
         })
-        with urllib_request.urlopen(req, timeout=10) as resp:
+        with urllib_request.urlopen(req, timeout=10, context=ctx) as resp:
             data = json.loads(resp.read().decode())
         tag = data.get("tag_name", "")  # e.g. "build-8"
         remote_version = int(tag.replace("build-", "")) if tag.startswith("build-") else 0
@@ -433,14 +458,11 @@ def check_for_updates():
         is_mac = platform.system() == "Darwin"
         suffix = "macOS.zip" if is_mac else ".exe"
         for asset in data.get("assets", []):
-            print(f"[Updater] Asset: {asset['name']}")
             if asset["name"].endswith(suffix):
                 return (remote_version, asset["browser_download_url"], asset["name"])
-        print(f"[Updater] No matching asset found for {'macOS' if is_mac else 'Windows'}")
-        return None
+        return f"ERROR: No se encontró asset para {'macOS' if is_mac else 'Windows'}"
     except Exception as e:
-        print(f"[Updater] Error checking for updates: {e}")
-        return None
+        return f"ERROR: {e}"
 
 
 def download_and_apply_update(download_url, asset_name, status_callback=None):
@@ -453,7 +475,11 @@ def download_and_apply_update(download_url, asset_name, status_callback=None):
         import tempfile
         tmp_dir = tempfile.mkdtemp()
         tmp_file = os.path.join(tmp_dir, asset_name)
-        urllib_request.urlretrieve(download_url, tmp_file)
+        ctx = _get_ssl_context()
+        req = urllib_request.Request(download_url, headers={"User-Agent": "RemesaPro-Updater"})
+        with urllib_request.urlopen(req, timeout=60, context=ctx) as resp:
+            with open(tmp_file, 'wb') as f:
+                f.write(resp.read())
 
         current_exe = sys.executable  # Path of the running .exe / binary
         is_mac = platform.system() == "Darwin"
@@ -639,7 +665,7 @@ class RemesaApp:
     def _auto_check_updates(self):
         """Background check on startup — non-intrusive."""
         result = check_for_updates()
-        if result:
+        if result and isinstance(result, tuple):
             new_ver, url, name = result
             self.root.after(0, lambda: self._prompt_update(new_ver, url, name))
 
@@ -662,14 +688,19 @@ class RemesaApp:
         self.root.update()
         try:
             result = check_for_updates()
-            if result:
+            if isinstance(result, str) and result.startswith("ERROR"):
+                # Error message returned
+                self.lbl_status.config(text="Error al comprobar")
+                messagebox.showerror("Error de actualización",
+                                     f"{result}\n\nAPI: {GITHUB_API_LATEST}",
+                                     parent=self.root)
+            elif result and isinstance(result, tuple):
                 new_ver, url, name = result
                 self._prompt_update(new_ver, url, name)
             else:
                 self.lbl_status.config(text="Listo")
                 messagebox.showinfo("Sin actualizaciones",
-                                    f"Ya tienes la última versión (v{APP_VERSION}).\n\n"
-                                    f"Repo: {GITHUB_REPO}\nAPI: {GITHUB_API_LATEST}",
+                                    f"Ya tienes la última versión (v{APP_VERSION}).",
                                     parent=self.root)
         except Exception as e:
             self.lbl_status.config(text="Error al comprobar")
