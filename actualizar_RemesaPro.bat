@@ -11,7 +11,7 @@ echo  ================================================
 echo.
 
 REM --- Configuracion ---
-set REPO=pollosev-sys/RemesaPro
+set REPO=aruizciee/RemesaPro
 set EXE_NAME=RemesaPro.exe
 set TOKEN_FILE=%~dp0.github_token
 

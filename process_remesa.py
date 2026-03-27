@@ -18,6 +18,11 @@ from urllib import request as urllib_request
 from xml.etree.ElementTree import Element, SubElement, ElementTree, indent
 import ssl
 
+# Pre-compiled regex patterns
+_RE_DECIMAL_AMOUNT = re.compile(r"(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})")
+_RE_WHOLE_EURO = re.compile(r"(\d+)\s*€")
+_RE_NOMBRE = re.compile(r"[Nn]ombre:\s*(.+)")
+
 APP_VERSION = 7  # Matches GitHub build number
 
 # Configuration defaults
@@ -385,14 +390,17 @@ class EditDialog(tk.Toplevel):
 
     def open_pdf(self):
         try:
-            # We need to know full path. result_data only has filename usually? 
-            # Wait, result_data needs full path or we reconstruct it.
-            # Let's verify what result_data has.
             filepath = self.result_data.get('FULLPATH')
-            if filepath and os.path.exists(filepath):
-                os.startfile(filepath)
-            else:
+            if not filepath or not os.path.exists(filepath):
                 messagebox.showerror("Error", "No se encuentra el archivo PDF.")
+                return
+            system = platform.system()
+            if system == "Windows":
+                os.startfile(filepath)
+            elif system == "Darwin":
+                subprocess.Popen(["open", filepath])
+            else:
+                subprocess.Popen(["xdg-open", filepath])
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo abrir PDF: {e}")
 
@@ -402,7 +410,8 @@ class EditDialog(tk.Toplevel):
         self.result_data['IBAN'] = self.iban_var.get()
         try:
             self.result_data['IMPORTE'] = float(self.amount_var.get().replace(',','.'))
-        except: pass
+        except (ValueError, TypeError):
+            pass
         
         # Callback to update Treeview
         if self.save_callback:
@@ -527,6 +536,38 @@ def download_and_apply_update(download_url, asset_name, status_callback=None):
         return False
 
 
+class SepaPreviewDialog(tk.Toplevel):
+    """Read-only preview of the SEPA XML before saving."""
+    def __init__(self, parent, xml_content):
+        super().__init__(parent)
+        self.title("Vista previa SEPA XML")
+        self.geometry("800x600")
+
+        tk.Label(self, text="Vista previa del XML SEPA (solo lectura)",
+                 font=("Helvetica", 11, "bold")).pack(pady=8)
+
+        frame = tk.Frame(self)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 5))
+
+        vsb = tk.Scrollbar(frame, orient="vertical")
+        hsb = tk.Scrollbar(frame, orient="horizontal")
+        text_widget = tk.Text(frame, wrap="none", font=("Consolas", 9),
+                              yscrollcommand=vsb.set, xscrollcommand=hsb.set,
+                              state="normal")
+        vsb.config(command=text_widget.yview)
+        hsb.config(command=text_widget.xview)
+
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        hsb.pack(side=tk.BOTTOM, fill=tk.X)
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        text_widget.insert("1.0", xml_content)
+        text_widget.config(state="disabled")
+
+        tk.Button(self, text="Cerrar", command=self.destroy,
+                  font=("Helvetica", 10)).pack(pady=8)
+
+
 class RemesaApp:
     def __init__(self, root):
         self.root = root
@@ -607,6 +648,9 @@ class RemesaApp:
 
         self.btn_sepa = ttk.Button(btn_frame, text="🏦 3. Generar SEPA XML", command=self.generate_sepa, state="disabled")
         self.btn_sepa.pack(side=tk.LEFT, padx=5)
+
+        self.btn_sepa_preview = ttk.Button(btn_frame, text="🔍 Vista previa XML", command=self.preview_sepa, state="disabled")
+        self.btn_sepa_preview.pack(side=tk.LEFT, padx=5)
 
         ttk.Button(btn_frame, text="⚙ SEPA Config", command=self.open_sepa_config).pack(side=tk.LEFT, padx=5)
 
@@ -783,7 +827,8 @@ class RemesaApp:
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, 'r') as f: return json.load(f)
-            except: pass
+            except (json.JSONDecodeError, IOError):
+                pass
         return {}
 
     def save_config(self):
@@ -792,7 +837,8 @@ class RemesaApp:
         self.config["sepa_exec_date"] = self.sepa_date_var.get()
         try:
             with open(CONFIG_FILE, 'w') as f: json.dump(self.config, f)
-        except: pass
+        except IOError:
+            pass
 
     def select_folder(self):
         f = filedialog.askdirectory(title="Selecciona Carpeta de PDFs", initialdir=self.config.get("last_folder", "."))
@@ -917,7 +963,7 @@ class RemesaApp:
             self.root.after(0, self.refresh_table)
 
         except Exception as e:
-            print(e)
+            self.root.after(0, lambda err=e: messagebox.showerror("Error", f"Error al procesar: {err}"))
         finally:
             self.root.after(0, lambda: self.progress_var.set(0))
             self.root.after(0, lambda: self.btn_process.config(state="normal"))
@@ -970,6 +1016,7 @@ class RemesaApp:
         
         self.btn_save.config(state="normal")
         self.btn_sepa.config(state="normal")
+        self.btn_sepa_preview.config(state="normal")
 
         total_amount = sum(r['IMPORTE'] for r in self.current_results)
         total_str = f"{total_amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -1022,6 +1069,38 @@ class RemesaApp:
         except Exception as e:
             messagebox.showerror("Error SEPA", f"Error generando XML: {e}")
 
+    def preview_sepa(self):
+        if not self.current_results:
+            return
+        try:
+            exec_date_str = self.sepa_date_var.get().strip()
+            try:
+                exec_date = datetime.strptime(exec_date_str, "%d/%m/%Y").strftime("%Y-%m-%d")
+            except ValueError:
+                exec_date = datetime.now().strftime("%Y-%m-%d")
+
+            import tempfile, os as _os
+            with tempfile.NamedTemporaryFile(suffix=".xml", delete=False, mode='w') as tmp:
+                tmp_path = tmp.name
+
+            output_path = generate_sepa_xml(self.current_results, self.config,
+                                            output_path=tmp_path, exec_date=exec_date)
+            if not output_path:
+                messagebox.showwarning("Aviso", "No hay transacciones válidas para previsualizar.")
+                return
+
+            with open(tmp_path, 'r', encoding='utf-8') as f:
+                xml_content = f.read()
+            try:
+                _os.remove(tmp_path)
+            except OSError:
+                pass
+
+            SepaPreviewDialog(self.root, xml_content)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Error generando vista previa: {e}")
+
     def open_sepa_config(self):
         def on_save(sepa_data):
             self.config.update(sepa_data)
@@ -1032,29 +1111,54 @@ class RemesaApp:
 
 # --- Logic ---
 
+REQUIRED_DB_COLUMNS = {'NOMBRE', 'IBAN'}
+
+def _validate_db_schema(df):
+    """Returns missing required columns, or empty set if schema is valid."""
+    return REQUIRED_DB_COLUMNS - set(df.columns)
+
 def load_database(db_path):
     try:
         df = pd.read_excel(db_path, engine='openpyxl')
         df.columns = [c.strip() for c in df.columns]
+        missing = _validate_db_schema(df)
+        if missing:
+            messagebox.showerror(
+                "Error en Base de Datos",
+                f"La base de datos no tiene las columnas requeridas: {', '.join(sorted(missing))}\n\n"
+                f"Columnas encontradas: {', '.join(df.columns.tolist())}"
+            )
+            return None
         return df
     except PermissionError:
         import shutil
         import time
         temp_path = db_path + f".temp_{int(time.time())}.xlsx"
         try:
-            print(f"🔒 Archivo Bloqueado. Copiando...")
+            print(f"Archivo bloqueado. Copiando...")
             shutil.copy2(db_path, temp_path)
             if os.path.exists(temp_path):
                 df = pd.read_excel(temp_path, engine='openpyxl')
                 df.columns = [c.strip() for c in df.columns]
+                missing = _validate_db_schema(df)
+                if missing:
+                    messagebox.showerror(
+                        "Error en Base de Datos",
+                        f"Columnas requeridas no encontradas: {', '.join(sorted(missing))}"
+                    )
+                    return None
                 return df
             return None
-        except: return None
+        except Exception:
+            return None
         finally:
-             try:
-                if os.path.exists(temp_path): os.remove(temp_path)
-             except: pass
-    except: return None
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except OSError:
+                pass
+    except Exception:
+        return None
 
 def extract_info_from_excel(xlsx_path, db_df):
     """Extract provider name and total amount from Excel expense report template.
@@ -1069,7 +1173,7 @@ def extract_info_from_excel(xlsx_path, db_df):
         amount = 0.0
         try:
             amount = parse_amount(ws['J56'].value)
-        except:
+        except (ValueError, TypeError):
             pass
 
         # Fallback: search for "Cantidad total" label and read adjacent cell to the right
@@ -1084,7 +1188,7 @@ def extract_info_from_excel(xlsx_path, db_df):
                                     amount = parse_amount(adj.value)
                                     if amount != 0.0:
                                         break
-                                except:
+                                except (ValueError, TypeError):
                                     pass
                         break
 
@@ -1116,23 +1220,24 @@ def extract_info_from_excel(xlsx_path, db_df):
 def extract_info_from_pdf(pdf_path, db_df):
     try:
         reader = pypdf.PdfReader(pdf_path)
-        first_page = reader.pages[0]
-        text = first_page.extract_text()
-        
-        # 1. Amount
-        # Regex captures amounts with/without decimals: 1.234,56 | 28,92 | 28.92 | 23 €
+        # Read all pages (not just first) to handle multi-page documents
+        text = "\n".join(
+            page.extract_text() or "" for page in reader.pages
+        )
+
+        # 1. Amount — use pre-compiled regex
         amount = 0.0
-        # Pattern for amounts with decimals
-        decimal_matches = re.finditer(r"(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})", text)
         candidates = []
-        for m in decimal_matches:
-            try: candidates.append((m.start(), parse_amount(m.group(1))))
-            except: pass
-        # Pattern for whole-number amounts followed by € (e.g. "23 €")
-        whole_matches = re.finditer(r"(\d+)\s*€", text)
-        for m in whole_matches:
-            try: candidates.append((m.start(), float(m.group(1))))
-            except: pass
+        for m in _RE_DECIMAL_AMOUNT.finditer(text):
+            try:
+                candidates.append((m.start(), parse_amount(m.group(1))))
+            except (ValueError, TypeError):
+                pass
+        for m in _RE_WHOLE_EURO.finditer(text):
+            try:
+                candidates.append((m.start(), float(m.group(1))))
+            except (ValueError, TypeError):
+                pass
 
         # Search for total label — support multiple formats
         total_labels = ["total gastos", "cantidad total", "total"]
@@ -1153,7 +1258,7 @@ def extract_info_from_pdf(pdf_path, db_df):
                     closest_val = val
             amount = closest_val if closest_val is not None else (max([c[1] for c in candidates]) if candidates else 0.0)
         else:
-             amount = max([c[1] for c in candidates]) if candidates else 0.0
+            amount = max([c[1] for c in candidates]) if candidates else 0.0
 
         # 2. Name - Extract from PDF content first (most reliable), then filename
         filename = os.path.basename(pdf_path)
@@ -1161,36 +1266,29 @@ def extract_info_from_pdf(pdf_path, db_df):
         name_from_file = None
 
         # Priority 1: "Nombre: XXX" inside the PDF (expense report format)
-        name_match = re.search(r"[Nn]ombre:\s*(.+)", text)
+        name_match = _RE_NOMBRE.search(text)
         if name_match:
             extracted = name_match.group(1).strip().upper()
-            # Clean up: stop at newline or next field label
             extracted = re.split(r"\n|Fecha:|Semestre:|Programa", extracted)[0].strip()
             if len(extracted) > 2:
                 name_from_pdf = extracted
 
         # Priority 2: Filename patterns
-        #   "SP26_ALBERTO RUIZ_compras en supersol.pdf"
-        #   "ALBERTO RUIZ - informe gastos.pdf"
-        #   "informe_ALBERTO RUIZ.pdf"
         parts = filename.replace('.pdf', '').replace('.PDF', '').split('_')
         if len(parts) >= 2:
-            # Try second part (most common: SEMESTER_NAME_description)
             candidate = parts[1].strip()
             if len(candidate) > 2 and not candidate.isdigit():
                 name_from_file = candidate.replace('.', ' ').strip().upper()
 
-        # Use PDF name if available, otherwise filename
         name_from_file = name_from_pdf or name_from_file
 
         db_names = db_df['NOMBRE'].dropna().astype(str).tolist()
-        
         final_name, status, ambiguous_candidates = find_best_match(name_from_file, db_names, db_df, text)
-        
+
         return final_name, amount, status, ambiguous_candidates
 
     except Exception as e:
-        print(e)
+        print(f"PDF extraction error ({os.path.basename(pdf_path)}): {e}")
         return None, 0.0, "ERROR", None
 
 def find_best_match(name_from_file, db_names, db_df=None, pdf_text=""):
