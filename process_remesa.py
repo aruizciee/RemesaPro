@@ -825,17 +825,8 @@ class RemesaApp:
             
             # Save to File
             db_path = self.db_var.get()
-            
-            # Use append mode or rewrite? Pandas writes generic xlsx.
-            # Ideally load, append, save.
-            # Using locking safe logic from before?
-            # Creating a helper for saving DB
             try:
-                with pd.ExcelWriter(db_path, engine='openpyxl', mode='a', if_sheet_exists='overlay') as writer:
-                    # Actually appending to an existing excel without destroying formats is hard with pandas.
-                    # Best effort: Append to bottom.
-                    # Or simpler: Just re-save the whole thing if structure is simple.
-                    self.loaded_db_df.to_excel(db_path, index=False)
+                self.loaded_db_df.to_excel(db_path, index=False)
                 messagebox.showinfo("Base de Datos", f"Se ha añadido '{name}' a la base de datos.")
             except PermissionError:
                 messagebox.showwarning("Aviso", "No se pudo guardar en el Excel de Base de Datos porque está abierto. Se ha actualizado en memoria para esta sesión, pero no se guardará en el disco.")
@@ -995,7 +986,7 @@ def load_database(db_path):
         temp_path = db_path + f".temp_{int(time.time())}.xlsx"
         try:
             print(f"🔒 Archivo Bloqueado. Copiando...")
-            os.system(f'copy "{db_path}" "{temp_path}"')
+            shutil.copy2(db_path, temp_path)
             if os.path.exists(temp_path):
                 df = pd.read_excel(temp_path, engine='openpyxl')
                 df.columns = [c.strip() for c in df.columns]
