@@ -214,7 +214,7 @@ class SepaConfigDialog(tk.Toplevel):
         self.destroy()
 
 
-def generate_sepa_xml(results, config, output_path=None):
+def generate_sepa_xml(results, config, output_path=None, exec_date=None):
     """Generate SEPA Credit Transfer XML (pain.001.001.03) from remesa results."""
     # Filter only valid transactions (with IBAN)
     valid = [r for r in results
@@ -257,7 +257,7 @@ def generate_sepa_xml(results, config, output_path=None):
     svc = SubElement(SubElement(pmt, "PmtTpInf"), "SvcLvl")
     SubElement(svc, "Cd").text = "SEPA"
 
-    SubElement(pmt, "ReqdExctnDt").text = now.strftime("%Y-%m-%d")
+    SubElement(pmt, "ReqdExctnDt").text = exec_date or now.strftime("%Y-%m-%d")
 
     # Debtor
     dbtr = SubElement(pmt, "Dbtr")
@@ -589,6 +589,12 @@ class RemesaApp:
         ttk.Entry(input_frame, textvariable=self.db_var, width=80).grid(row=1, column=1, padx=5, pady=5)
         ttk.Button(input_frame, text="Examinar", command=self.select_db).grid(row=1, column=2, padx=5, pady=5)
 
+        ttk.Label(input_frame, text="Fecha ejecución SEPA:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        default_date = self.config.get("sepa_exec_date", datetime.now().strftime("%d/%m/%Y"))
+        self.sepa_date_var = tk.StringVar(value=default_date)
+        ttk.Entry(input_frame, textvariable=self.sepa_date_var, width=15).grid(row=2, column=1, padx=5, pady=5, sticky="w")
+        ttk.Label(input_frame, text="(DD/MM/AAAA)", foreground="gray").grid(row=2, column=2, padx=5, pady=5, sticky="w")
+
         # Buttons
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(fill=tk.X, pady=5)
@@ -615,6 +621,11 @@ class RemesaApp:
         
         ttk.Label(btn_frame, text="(Doble clic en fila para Editar/Abrir PDF)", foreground="gray").pack(side=tk.RIGHT)
 
+        # Progress bar
+        self.progress_var = tk.IntVar(value=0)
+        self.progressbar = ttk.Progressbar(main_frame, variable=self.progress_var, maximum=100)
+        self.progressbar.pack(fill=tk.X, pady=(0, 5))
+
         # Treeview
         tree_frame = ttk.Frame(main_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True, pady=10)
@@ -627,11 +638,11 @@ class RemesaApp:
         self.tree.column("idx", width=0, stretch=False)
         self.tree.heading("idx", text="")
         
-        self.tree.heading("archivo", text="Archivo PDF")
-        self.tree.heading("nombre_db", text="Nombre Detectado")
-        self.tree.heading("iban", text="IBAN")
-        self.tree.heading("importe", text="Importe (€)")
-        self.tree.heading("estado", text="Estado")
+        self.tree.heading("archivo", text="Archivo PDF", command=lambda: self._sort_table("archivo"))
+        self.tree.heading("nombre_db", text="Nombre Detectado", command=lambda: self._sort_table("nombre_db"))
+        self.tree.heading("iban", text="IBAN", command=lambda: self._sort_table("iban"))
+        self.tree.heading("importe", text="Importe (€)", command=lambda: self._sort_table("importe"))
+        self.tree.heading("estado", text="Estado", command=lambda: self._sort_table("estado"))
         
         self.tree.column("archivo", width=250)
         self.tree.column("nombre_db", width=250)
@@ -657,10 +668,38 @@ class RemesaApp:
         self.tree.bind("<Double-1>", self.on_tree_double_click)
         
         self.current_results = []
-        self.loaded_db_df = None # Store loaded DB in memory
+        self.loaded_db_df = None
+        self._sort_col = None
+        self._sort_reverse = False
 
         # Check for updates on startup (in background thread)
         threading.Thread(target=self._auto_check_updates, daemon=True).start()
+
+    def _sort_table(self, col):
+        col_key = {
+            "archivo":    lambda r: r['FILENAME'].lower(),
+            "nombre_db":  lambda r: r['NOMBRE'].lower(),
+            "iban":       lambda r: r['IBAN'].lower(),
+            "importe":    lambda r: r['IMPORTE'],
+            "estado":     lambda r: (0 if 'NO ENCONTRADO' not in r['IBAN'] and 'AMBIGUO' not in r['IBAN'] else (2 if 'NO ENCONTRADO' in r['IBAN'] else 1)),
+        }
+        col_labels = {
+            "archivo": "Archivo PDF", "nombre_db": "Nombre Detectado",
+            "iban": "IBAN", "importe": "Importe (€)", "estado": "Estado",
+        }
+        if self._sort_col == col:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_col = col
+            self._sort_reverse = False
+
+        self.current_results.sort(key=col_key[col], reverse=self._sort_reverse)
+
+        for c, label in col_labels.items():
+            arrow = (" ▼" if self._sort_reverse else " ▲") if c == col else ""
+            self.tree.heading(c, text=label + arrow, command=lambda _c=c: self._sort_table(_c))
+
+        self.refresh_table()
 
     def _auto_check_updates(self):
         """Background check on startup — non-intrusive."""
@@ -750,6 +789,7 @@ class RemesaApp:
     def save_config(self):
         self.config["last_folder"] = self.folder_var.get()
         self.config["last_db"] = self.db_var.get()
+        self.config["sepa_exec_date"] = self.sepa_date_var.get()
         try:
             with open(CONFIG_FILE, 'w') as f: json.dump(self.config, f)
         except: pass
@@ -847,14 +887,19 @@ class RemesaApp:
         t = threading.Thread(target=self.run_process)
         t.start()
 
+    def _update_progress(self, current, total):
+        pct = int(current / total * 100) if total else 0
+        self.progress_var.set(pct)
+        self.lbl_status.config(text=f"Procesando... {current}/{total}")
+
     def run_process(self):
         try:
             folder = self.folder_var.get()
             db_file = self.db_var.get()
-            
+
             if not folder or not os.path.isdir(folder):
                 messagebox.showerror("Error", "Carpeta inválida.")
-                return 
+                return
 
             if not db_file or not os.path.exists(db_file):
                 messagebox.showerror("Error", "Base inválida.")
@@ -864,13 +909,17 @@ class RemesaApp:
             if self.loaded_db_df is None:
                 messagebox.showerror("Error", "Error cargando BD.")
                 return
-            
-            self.current_results = generate_remesa_data(folder, self.loaded_db_df)
+
+            def progress_cb(current, total):
+                self.root.after(0, lambda c=current, t=total: self._update_progress(c, t))
+
+            self.current_results = generate_remesa_data(folder, self.loaded_db_df, progress_cb)
             self.root.after(0, self.refresh_table)
-            
+
         except Exception as e:
             print(e)
         finally:
+            self.root.after(0, lambda: self.progress_var.set(0))
             self.root.after(0, lambda: self.btn_process.config(state="normal"))
 
     def refresh_table(self):
@@ -921,13 +970,16 @@ class RemesaApp:
         
         self.btn_save.config(state="normal")
         self.btn_sepa.config(state="normal")
-        
+
+        total_amount = sum(r['IMPORTE'] for r in self.current_results)
+        total_str = f"{total_amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
         # Update status with counts
         if filter_problems:
             self.lbl_status.config(text=f"Mostrando {visible_count} problemas de {len(self.current_results)} archivos.")
         else:
             ok_count = len(self.current_results) - problem_count
-            self.lbl_status.config(text=f"Procesados {len(self.current_results)} archivos (✅ {ok_count} | ⚠️ {problem_count}).")
+            self.lbl_status.config(text=f"Procesados {len(self.current_results)} archivos · ✅ {ok_count} | ⚠️ {problem_count} | Total: {total_str} €")
         
         self.save_config()
 
@@ -955,7 +1007,12 @@ class RemesaApp:
                 return
 
         try:
-            output_file = generate_sepa_xml(self.current_results, self.config)
+            exec_date_str = self.sepa_date_var.get().strip()
+            try:
+                exec_date = datetime.strptime(exec_date_str, "%d/%m/%Y").strftime("%Y-%m-%d")
+            except ValueError:
+                exec_date = datetime.now().strftime("%Y-%m-%d")
+            output_file = generate_sepa_xml(self.current_results, self.config, exec_date=exec_date)
             if output_file:
                 messagebox.showinfo("SEPA XML Generado",
                     f"Archivo SEPA generado correctamente:\n{output_file}\n\n"
@@ -1207,13 +1264,16 @@ def find_best_match(name_from_file, db_names, db_df=None, pdf_text=""):
                      break
         return final_name, status, ambiguous_candidates
 
-def generate_remesa_data(folder_path, db_df):
+def generate_remesa_data(folder_path, db_df, progress_callback=None):
     results = []
     files = [f for f in os.listdir(folder_path)
              if f.lower().endswith('.pdf') or f.lower().endswith('.xlsx')]
     if 'NOMBRE' not in db_df.columns: return []
 
-    for filename in files:
+    total = len(files)
+    for i, filename in enumerate(files, 1):
+        if progress_callback:
+            progress_callback(i, total)
         filepath = os.path.join(folder_path, filename)
         if filename.lower().endswith('.xlsx'):
             extracted_name, amount, status, ambiguous_candidates = extract_info_from_excel(filepath, db_df)
