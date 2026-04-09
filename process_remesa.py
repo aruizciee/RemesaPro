@@ -595,6 +595,11 @@ class RemesaApp:
         ttk.Entry(input_frame, textvariable=self.sepa_date_var, width=15).grid(row=2, column=1, padx=5, pady=5, sticky="w")
         ttk.Label(input_frame, text="(DD/MM/AAAA)", foreground="gray").grid(row=2, column=2, padx=5, pady=5, sticky="w")
 
+        ttk.Label(input_frame, text="Concepto transferencia:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        self.concepto_var = tk.StringVar(value=self.config.get("concepto_global", ""))
+        ttk.Entry(input_frame, textvariable=self.concepto_var, width=80).grid(row=3, column=1, padx=5, pady=5)
+        ttk.Label(input_frame, text="(se incluye en el Excel)", foreground="gray").grid(row=3, column=2, padx=5, pady=5, sticky="w")
+
         # Buttons
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(fill=tk.X, pady=5)
@@ -790,6 +795,7 @@ class RemesaApp:
         self.config["last_folder"] = self.folder_var.get()
         self.config["last_db"] = self.db_var.get()
         self.config["sepa_exec_date"] = self.sepa_date_var.get()
+        self.config["concepto_global"] = self.concepto_var.get()
         try:
             with open(CONFIG_FILE, 'w') as f: json.dump(self.config, f)
         except: pass
@@ -986,7 +992,11 @@ class RemesaApp:
     def save_results(self):
         if not self.current_results: return
         try:
-            output_file = save_to_excel(self.current_results, TEMPLATE_FILE, OUTPUT_PREFIX)
+            concepto = self.concepto_var.get().strip()
+            results = self.current_results
+            if concepto:
+                results = [{**r, 'CONCEPTO_NORMA': concepto} for r in results]
+            output_file = save_to_excel(results, TEMPLATE_FILE, OUTPUT_PREFIX)
             if output_file:
                 messagebox.showinfo("Éxito", f"Guardado:\n{output_file}")
         except Exception as e:
@@ -1012,7 +1022,11 @@ class RemesaApp:
                 exec_date = datetime.strptime(exec_date_str, "%d/%m/%Y").strftime("%Y-%m-%d")
             except ValueError:
                 exec_date = datetime.now().strftime("%Y-%m-%d")
-            output_file = generate_sepa_xml(self.current_results, self.config, exec_date=exec_date)
+            concepto = self.concepto_var.get().strip()
+            sepa_results = self.current_results
+            if concepto:
+                sepa_results = [{**r, 'CONCEPTO_NORMA': concepto} for r in sepa_results]
+            output_file = generate_sepa_xml(sepa_results, self.config, exec_date=exec_date)
             if output_file:
                 messagebox.showinfo("SEPA XML Generado",
                     f"Archivo SEPA generado correctamente:\n{output_file}\n\n"
