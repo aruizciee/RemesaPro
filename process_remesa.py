@@ -367,6 +367,10 @@ class EditDialog(tk.Toplevel):
         self.amount_var = tk.StringVar(value=str(result_data['IMPORTE']))
         tk.Entry(input_frame, textvariable=self.amount_var, width=20).grid(row=2, column=1, pady=5, sticky="w")
 
+        tk.Label(input_frame, text="Concepto:").grid(row=3, column=0, sticky="w")
+        self.concepto_var = tk.StringVar(value=result_data.get('CONCEPTO_NORMA', ''))
+        tk.Entry(input_frame, textvariable=self.concepto_var, width=40).grid(row=3, column=1, pady=5)
+
         # Actions
         btn_frame = tk.Frame(self)
         btn_frame.pack(fill=tk.X, pady=20, padx=PADDING)
@@ -403,6 +407,7 @@ class EditDialog(tk.Toplevel):
         try:
             self.result_data['IMPORTE'] = float(self.amount_var.get().replace(',','.'))
         except: pass
+        self.result_data['CONCEPTO_NORMA'] = self.concepto_var.get()
         
         # Callback to update Treeview
         if self.save_callback:
@@ -595,10 +600,6 @@ class RemesaApp:
         ttk.Entry(input_frame, textvariable=self.sepa_date_var, width=15).grid(row=2, column=1, padx=5, pady=5, sticky="w")
         ttk.Label(input_frame, text="(DD/MM/AAAA)", foreground="gray").grid(row=2, column=2, padx=5, pady=5, sticky="w")
 
-        ttk.Label(input_frame, text="Concepto transferencia:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
-        self.concepto_var = tk.StringVar(value=self.config.get("concepto_global", ""))
-        ttk.Entry(input_frame, textvariable=self.concepto_var, width=80).grid(row=3, column=1, padx=5, pady=5)
-        ttk.Label(input_frame, text="(se incluye en el Excel)", foreground="gray").grid(row=3, column=2, padx=5, pady=5, sticky="w")
 
         # Buttons
         btn_frame = ttk.Frame(main_frame)
@@ -636,24 +637,26 @@ class RemesaApp:
         tree_frame.pack(fill=tk.BOTH, expand=True, pady=10)
         
         # Add hidden index column for proper mapping when filtered
-        columns = ("idx", "archivo", "nombre_db", "iban", "importe", "estado")
+        columns = ("idx", "archivo", "nombre_db", "iban", "importe", "concepto", "estado")
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
-        
+
         # Hide the index column
         self.tree.column("idx", width=0, stretch=False)
         self.tree.heading("idx", text="")
-        
+
         self.tree.heading("archivo", text="Archivo PDF", command=lambda: self._sort_table("archivo"))
         self.tree.heading("nombre_db", text="Nombre Detectado", command=lambda: self._sort_table("nombre_db"))
         self.tree.heading("iban", text="IBAN", command=lambda: self._sort_table("iban"))
         self.tree.heading("importe", text="Importe (€)", command=lambda: self._sort_table("importe"))
+        self.tree.heading("concepto", text="Concepto", command=lambda: self._sort_table("concepto"))
         self.tree.heading("estado", text="Estado", command=lambda: self._sort_table("estado"))
-        
-        self.tree.column("archivo", width=250)
-        self.tree.column("nombre_db", width=250)
-        self.tree.column("iban", width=250)
+
+        self.tree.column("archivo", width=200)
+        self.tree.column("nombre_db", width=200)
+        self.tree.column("iban", width=200)
         self.tree.column("importe", width=80, anchor="e")
-        self.tree.column("estado", width=100)
+        self.tree.column("concepto", width=200)
+        self.tree.column("estado", width=80)
         
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
@@ -686,11 +689,12 @@ class RemesaApp:
             "nombre_db":  lambda r: r['NOMBRE'].lower(),
             "iban":       lambda r: r['IBAN'].lower(),
             "importe":    lambda r: r['IMPORTE'],
+            "concepto":   lambda r: r.get('CONCEPTO_NORMA', '').lower(),
             "estado":     lambda r: (0 if 'NO ENCONTRADO' not in r['IBAN'] and 'AMBIGUO' not in r['IBAN'] else (2 if 'NO ENCONTRADO' in r['IBAN'] else 1)),
         }
         col_labels = {
             "archivo": "Archivo PDF", "nombre_db": "Nombre Detectado",
-            "iban": "IBAN", "importe": "Importe (€)", "estado": "Estado",
+            "iban": "IBAN", "importe": "Importe (€)", "concepto": "Concepto", "estado": "Estado",
         }
         if self._sort_col == col:
             self._sort_reverse = not self._sort_reverse
@@ -795,7 +799,6 @@ class RemesaApp:
         self.config["last_folder"] = self.folder_var.get()
         self.config["last_db"] = self.db_var.get()
         self.config["sepa_exec_date"] = self.sepa_date_var.get()
-        self.config["concepto_global"] = self.concepto_var.get()
         try:
             with open(CONFIG_FILE, 'w') as f: json.dump(self.config, f)
         except: pass
@@ -970,6 +973,7 @@ class RemesaApp:
                 display_name,
                 r['IBAN'],
                 f"{r['IMPORTE']:.2f}",
+                r.get('CONCEPTO_NORMA', ''),
                 status_text
             ), tags=(tag,))
             visible_count += 1
@@ -992,11 +996,7 @@ class RemesaApp:
     def save_results(self):
         if not self.current_results: return
         try:
-            concepto = self.concepto_var.get().strip()
-            results = self.current_results
-            if concepto:
-                results = [{**r, 'CONCEPTO_NORMA': concepto} for r in results]
-            output_file = save_to_excel(results, TEMPLATE_FILE, OUTPUT_PREFIX)
+            output_file = save_to_excel(self.current_results, TEMPLATE_FILE, OUTPUT_PREFIX)
             if output_file:
                 messagebox.showinfo("Éxito", f"Guardado:\n{output_file}")
         except Exception as e:
@@ -1022,11 +1022,7 @@ class RemesaApp:
                 exec_date = datetime.strptime(exec_date_str, "%d/%m/%Y").strftime("%Y-%m-%d")
             except ValueError:
                 exec_date = datetime.now().strftime("%Y-%m-%d")
-            concepto = self.concepto_var.get().strip()
-            sepa_results = self.current_results
-            if concepto:
-                sepa_results = [{**r, 'CONCEPTO_NORMA': concepto} for r in sepa_results]
-            output_file = generate_sepa_xml(sepa_results, self.config, exec_date=exec_date)
+            output_file = generate_sepa_xml(self.current_results, self.config, exec_date=exec_date)
             if output_file:
                 messagebox.showinfo("SEPA XML Generado",
                     f"Archivo SEPA generado correctamente:\n{output_file}\n\n"
