@@ -675,24 +675,26 @@ class RemesaApp:
         tree_frame.pack(fill=tk.BOTH, expand=True, pady=10)
         
         # Add hidden index column for proper mapping when filtered
-        columns = ("idx", "archivo", "nombre_db", "iban", "importe", "estado")
+        columns = ("idx", "archivo", "nombre_db", "iban", "importe", "concepto", "estado")
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
-        
+
         # Hide the index column
         self.tree.column("idx", width=0, stretch=False)
         self.tree.heading("idx", text="")
-        
+
         self.tree.heading("archivo", text="Archivo PDF", command=lambda: self._sort_table("archivo"))
         self.tree.heading("nombre_db", text="Nombre Detectado", command=lambda: self._sort_table("nombre_db"))
         self.tree.heading("iban", text="IBAN", command=lambda: self._sort_table("iban"))
         self.tree.heading("importe", text="Importe (€)", command=lambda: self._sort_table("importe"))
+        self.tree.heading("concepto", text="Concepto", command=lambda: self._sort_table("concepto"))
         self.tree.heading("estado", text="Estado", command=lambda: self._sort_table("estado"))
-        
-        self.tree.column("archivo", width=250)
-        self.tree.column("nombre_db", width=250)
-        self.tree.column("iban", width=250)
+
+        self.tree.column("archivo", width=200)
+        self.tree.column("nombre_db", width=200)
+        self.tree.column("iban", width=200)
         self.tree.column("importe", width=80, anchor="e")
-        self.tree.column("estado", width=100)
+        self.tree.column("concepto", width=180)
+        self.tree.column("estado", width=80)
         
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
@@ -710,7 +712,16 @@ class RemesaApp:
         
         # Bind Double Click
         self.tree.bind("<Double-1>", self.on_tree_double_click)
-        
+
+        # Bind right-click context menu and Delete key
+        self.tree.bind("<Button-3>", self._show_context_menu)
+        self.tree.bind("<Delete>", lambda e: self._delete_selected_row())
+
+        self._context_menu = tk.Menu(self.root, tearoff=0)
+        self._context_menu.add_command(label="✏️  Editar", command=self._edit_selected_row)
+        self._context_menu.add_separator()
+        self._context_menu.add_command(label="🗑️  Eliminar de la remesa", command=self._delete_selected_row)
+
         self.current_results = []
         self.loaded_db_df = None
         self._sort_col = None
@@ -725,11 +736,12 @@ class RemesaApp:
             "nombre_db":  lambda r: r['NOMBRE'].lower(),
             "iban":       lambda r: r['IBAN'].lower(),
             "importe":    lambda r: r['IMPORTE'],
+            "concepto":   lambda r: r.get('CONCEPTO_NORMA', '').lower(),
             "estado":     lambda r: (0 if 'NO ENCONTRADO' not in r['IBAN'] and 'AMBIGUO' not in r['IBAN'] else (2 if 'NO ENCONTRADO' in r['IBAN'] else 1)),
         }
         col_labels = {
             "archivo": "Archivo PDF", "nombre_db": "Nombre Detectado",
-            "iban": "IBAN", "importe": "Importe (€)", "estado": "Estado",
+            "iban": "IBAN", "importe": "Importe (€)", "concepto": "Concepto", "estado": "Estado",
         }
         if self._sort_col == col:
             self._sort_reverse = not self._sort_reverse
@@ -847,6 +859,45 @@ class RemesaApp:
     def select_db(self):
         f = filedialog.askopenfilename(title="Selecciona Base de Datos", filetypes=[("Excel Files", "*.xlsx")], initialdir=os.path.dirname(self.config.get("last_db", ".")))
         if f: self.db_var.set(f)
+
+    def _show_context_menu(self, event):
+        item_id = self.tree.identify_row(event.y)
+        if not item_id:
+            return
+        self.tree.selection_set(item_id)
+        self._context_menu.tk_popup(event.x_root, event.y_root)
+
+    def _edit_selected_row(self):
+        item_id = self.tree.selection()
+        if not item_id:
+            return
+        values = self.tree.item(item_id, 'values')
+        if not values:
+            return
+        actual_idx = int(values[0])
+        result_item = self.current_results[actual_idx]
+        if result_item.get('AMBIGUOUS_CANDIDATES'):
+            self.show_ambiguity_resolver(result_item)
+        else:
+            EditDialog(self.root, result_item, self.loaded_db_df, self.on_edit_save)
+
+    def _delete_selected_row(self):
+        item_id = self.tree.selection()
+        if not item_id:
+            return
+        values = self.tree.item(item_id, 'values')
+        if not values:
+            return
+        actual_idx = int(values[0])
+        filename = self.current_results[actual_idx]['FILENAME']
+        if not messagebox.askyesno(
+            "Eliminar registro",
+            f"¿Eliminar '{filename}' de la remesa?\n\nNo se borrará el archivo original.",
+            parent=self.root
+        ):
+            return
+        del self.current_results[actual_idx]
+        self.refresh_table()
 
     def on_tree_double_click(self, event):
         item_id = self.tree.selection()
@@ -1010,6 +1061,7 @@ class RemesaApp:
                 display_name,
                 r['IBAN'],
                 f"{r['IMPORTE']:.2f}",
+                r.get('CONCEPTO_NORMA', ''),
                 status_text
             ), tags=(tag,))
             visible_count += 1
