@@ -20,6 +20,7 @@ import ssl
 
 # Pre-compiled regex patterns
 _RE_DECIMAL_AMOUNT = re.compile(r"(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})")
+_RE_THOUSANDS_NODEC = re.compile(r"\b(\d{1,3}(?:\.\d{3})+)\b")  # e.g. "1.256" → 1256
 _RE_WHOLE_EURO = re.compile(r"(\d+)\s*€")
 _RE_NOMBRE = re.compile(r"[Nn]ombre:\s*(.+)")
 
@@ -49,15 +50,14 @@ def parse_amount(value):
     """
     Parse a numeric value from Excel cell or PDF text string.
     Handles all separator combinations:
-      - 28.92      → 28.92  (punto = decimal)
-      - 28,92      → 28.92  (coma = decimal)
+      - 28.92      → 28.92   (punto = decimal, 2 dígitos)
+      - 28,92      → 28.92   (coma = decimal)
+      - 1.256      → 1256.0  (punto = miles, exactamente 3 dígitos tras él)
       - 1.234,56   → 1234.56 (punto = miles, coma = decimal)
       - 1,234.56   → 1234.56 (coma = miles, punto = decimal)
-    Rule: when both separators are present, the rightmost one is the decimal.
     """
     if value is None:
         return 0.0
-    # Already a numeric type (e.g. openpyxl float) — use directly
     if isinstance(value, (int, float)):
         return float(value)
     s = str(value).strip().replace(' ', '').replace('€', '').replace('$', '')
@@ -80,9 +80,15 @@ def parse_amount(value):
             return float(s.replace(',', '.'))   # 28,92 → 28.92
         else:
             return float(s.replace(',', ''))    # 1,234 → 1234
-    else:
-        # Only dot or no separator — standard float
+    elif has_dot:
+        # Only dot: thousands separator if ALL groups after dots are exactly 3 digits
+        # e.g. "1.256" → 1256, "1.256.789" → 1256789, but "28.92" → 28.92
+        parts = s.split('.')
+        if all(len(p) == 3 for p in parts[1:]):
+            return float(s.replace('.', ''))    # 1.256 → 1256
         return float(s)                         # 28.92 → 28.92
+    else:
+        return float(s)
 
 
 def normalize_text(text):
@@ -1289,6 +1295,13 @@ def extract_info_from_pdf(pdf_path, db_df):
         for m in _RE_DECIMAL_AMOUNT.finditer(text):
             try:
                 candidates.append((m.start(), parse_amount(m.group(1))))
+            except (ValueError, TypeError):
+                pass
+        # Thousands-only format: "1.256" → 1256 (European, no decimal part)
+        for m in _RE_THOUSANDS_NODEC.finditer(text):
+            try:
+                val = float(m.group(1).replace('.', ''))
+                candidates.append((m.start(), val))
             except (ValueError, TypeError):
                 pass
         for m in _RE_WHOLE_EURO.finditer(text):
