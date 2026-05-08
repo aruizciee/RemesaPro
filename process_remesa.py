@@ -31,6 +31,7 @@ DEFAULT_DB_FILE = "Base datos IBAN proveedores.xlsx"
 TEMPLATE_FILE = "FA25_REMESA PAGOS SANTANDER_.xlsx"
 OUTPUT_PREFIX = "REMESA_GENERADA_"
 CONFIG_FILE = "remesa_config.json"
+SESSION_FILE = "remesa_session.json"
 LOGO_FILE = "ciee logo.png"
 
 # SEPA debtor fields (values loaded from local remesa_config.json, never from code)
@@ -642,8 +643,7 @@ class RemesaApp:
         ttk.Button(input_frame, text="Examinar", command=self.select_db).grid(row=1, column=2, padx=5, pady=5)
 
         ttk.Label(input_frame, text="Fecha ejecución SEPA:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
-        default_date = self.config.get("sepa_exec_date", datetime.now().strftime("%d/%m/%Y"))
-        self.sepa_date_var = tk.StringVar(value=default_date)
+        self.sepa_date_var = tk.StringVar(value=datetime.now().strftime("%d/%m/%Y"))
         ttk.Entry(input_frame, textvariable=self.sepa_date_var, width=15).grid(row=2, column=1, padx=5, pady=5, sticky="w")
         ttk.Label(input_frame, text="(DD/MM/AAAA)", foreground="gray").grid(row=2, column=2, padx=5, pady=5, sticky="w")
 
@@ -738,6 +738,9 @@ class RemesaApp:
         self.loaded_db_df = None
         self._sort_col = None
         self._sort_reverse = False
+
+        # Restore previous session if available
+        self.root.after(200, self.load_session)
 
         # Check for updates on startup (in background thread)
         threading.Thread(target=self._auto_check_updates, daemon=True).start()
@@ -858,11 +861,77 @@ class RemesaApp:
     def save_config(self):
         self.config["last_folder"] = self.folder_var.get()
         self.config["last_db"] = self.db_var.get()
-        self.config["sepa_exec_date"] = self.sepa_date_var.get()
         try:
             with open(CONFIG_FILE, 'w') as f: json.dump(self.config, f)
         except IOError:
             pass
+
+    def save_session(self):
+        if not self.current_results:
+            return
+        try:
+            serializable = []
+            for r in self.current_results:
+                entry = dict(r)
+                # Convert AMBIGUOUS_CANDIDATES tuples to lists for JSON
+                if entry.get('AMBIGUOUS_CANDIDATES'):
+                    entry['AMBIGUOUS_CANDIDATES'] = [list(c) for c in entry['AMBIGUOUS_CANDIDATES']]
+                serializable.append(entry)
+            session = {
+                'saved_at': datetime.now().strftime("%d/%m/%Y %H:%M"),
+                'folder': self.folder_var.get(),
+                'db': self.db_var.get(),
+                'results': serializable,
+            }
+            with open(SESSION_FILE, 'w', encoding='utf-8') as f:
+                json.dump(session, f, ensure_ascii=False, indent=2)
+        except IOError:
+            pass
+
+    def load_session(self):
+        if not os.path.exists(SESSION_FILE):
+            return
+        try:
+            with open(SESSION_FILE, 'r', encoding='utf-8') as f:
+                session = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return
+
+        results = session.get('results', [])
+        if not results:
+            return
+
+        saved_at = session.get('saved_at', 'desconocido')
+        folder = session.get('folder', '')
+        resp = messagebox.askyesno(
+            "Sesión anterior encontrada",
+            f"Se encontró una sesión guardada el {saved_at}.\n"
+            f"Carpeta: {os.path.basename(folder) or folder}\n"
+            f"Registros: {len(results)}\n\n"
+            "¿Restaurar la sesión anterior?",
+            parent=self.root
+        )
+        if not resp:
+            return
+
+        # Restore folder/db fields
+        if folder:
+            self.folder_var.set(folder)
+        db = session.get('db', '')
+        if db:
+            self.db_var.set(db)
+
+        # Restore results (convert AMBIGUOUS_CANDIDATES back to list of tuples)
+        for r in results:
+            if r.get('AMBIGUOUS_CANDIDATES'):
+                r['AMBIGUOUS_CANDIDATES'] = [tuple(c) for c in r['AMBIGUOUS_CANDIDATES']]
+        self.current_results = results
+
+        # Try to reload the DB so edits/additions still work
+        if db and os.path.exists(db):
+            self.loaded_db_df = load_database(db)
+
+        self.refresh_table()
 
     def select_folder(self):
         f = filedialog.askdirectory(title="Selecciona Carpeta de PDFs", initialdir=self.config.get("last_folder", "."))
@@ -1093,6 +1162,7 @@ class RemesaApp:
             self.lbl_status.config(text=f"Procesados {len(self.current_results)} archivos · ✅ {ok_count} | ⚠️ {problem_count} | Total: {total_str} €")
         
         self.save_config()
+        self.save_session()
 
     def save_results(self):
         if not self.current_results: return
