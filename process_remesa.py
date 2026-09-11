@@ -105,6 +105,276 @@ def normalize_text(text):
     text = text.lower().strip()
     return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
 
+def clean_db_value(value):
+    """Convierte un valor de la BD en texto limpio ('' si está vacío o es NaN)."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() in ("nan", "none", "nat"):
+        return ""
+    return text
+
+
+def find_db_row(db_df, name):
+    """Busca una fila de la BD por nombre exacto (sin distinguir mayúsculas ni acentos)."""
+    if db_df is None or 'NOMBRE' not in getattr(db_df, 'columns', []):
+        return None
+    target = normalize_text(name)
+    if not target:
+        return None
+    for _, row in db_df.iterrows():
+        if normalize_text(str(row.get('NOMBRE', ''))) == target:
+            return row
+    return None
+
+
+class AutocompleteEntry(tk.Entry):
+    """Entry con lista desplegable de proveedores.
+
+    Al escribir se muestran los nombres de la base de datos: primero los que
+    empiezan por el texto escrito y después los que lo contienen, ignorando
+    mayúsculas y acentos. Cuantas más letras se escriben, menos candidatos
+    quedan. Flechas ↑/↓ para navegar, Enter para elegir y Esc para cerrar.
+    """
+
+    MAX_VISIBLE_ROWS = 10
+    _IGNORED_KEYS = {
+        "Up", "Down", "Left", "Right", "Return", "KP_Enter", "Escape", "Tab",
+        "ISO_Left_Tab", "Shift_L", "Shift_R", "Control_L", "Control_R",
+        "Alt_L", "Alt_R", "Caps_Lock", "Home", "End", "Prior", "Next",
+    }
+
+    def __init__(self, master, values=None, on_select=None, on_commit=None,
+                 on_cancel=None, on_tab=None, on_focus_out=None,
+                 max_results=300, **kwargs):
+        super().__init__(master, **kwargs)
+        self.on_select = on_select        # se eligió un proveedor de la lista
+        self.on_commit = on_commit        # Enter sin lista desplegada
+        self.on_cancel = on_cancel        # Esc sin lista desplegada
+        self.on_tab = on_tab              # Tab (recibe shift: True/False)
+        self.on_focus_out = on_focus_out  # el foco salió del campo
+        self.max_results = max_results
+        self._popup = None
+        self._listbox = None
+        self.set_values(values or [])
+
+        self.bind("<KeyRelease>", self._on_key_release)
+        self.bind("<Down>", self._on_down)
+        self.bind("<Up>", self._on_up)
+        self.bind("<Return>", self._on_return)
+        self.bind("<KP_Enter>", self._on_return)
+        self.bind("<Tab>", lambda e: self._on_tab(e, shift=False))
+        self.bind("<Shift-Tab>", lambda e: self._on_tab(e, shift=True))
+        self.bind("<ISO_Left_Tab>", lambda e: self._on_tab(e, shift=True))
+        self.bind("<Escape>", self._on_escape)
+        self.bind("<FocusOut>", self._on_focus_out_event)
+        self.bind("<Destroy>", lambda e: self._destroy_popup())
+
+    # ── Datos ────────────────────────────────────────────────────────────
+    def set_values(self, values):
+        seen = set()
+        clean = []
+        for value in values or []:
+            text = str(value).strip()
+            key = normalize_text(text)
+            if text and key not in seen:
+                seen.add(key)
+                clean.append(text)
+        clean.sort(key=normalize_text)
+        self._values = clean
+        self._normalized = [(normalize_text(v), v) for v in clean]
+
+    def matches(self, text):
+        """Coincidencias ordenadas: por prefijo, por inicio de palabra y por contenido."""
+        target = normalize_text(text)
+        if not target:
+            return self._values[:self.max_results]
+        starts, word_starts, contains = [], [], []
+        for norm, original in self._normalized:
+            if norm.startswith(target):
+                starts.append(original)
+            elif any(word.startswith(target) for word in norm.split()):
+                word_starts.append(original)
+            elif target in norm:
+                contains.append(original)
+        if len(target) < 2:
+            # Con una sola letra se listan solo los que empiezan por ella
+            # (nombre o apellido); si no, saldría casi toda la base de datos.
+            return (starts + word_starts)[:self.max_results]
+        return (starts + word_starts + contains)[:self.max_results]
+
+    # ── Lista desplegable ────────────────────────────────────────────────
+    def _popup_alive(self):
+        return self._popup is not None and self._popup.winfo_exists()
+
+    def _list_visible(self):
+        return self._popup_alive() and self._popup.winfo_viewable()
+
+    def _ensure_popup(self):
+        if self._popup_alive():
+            return
+        self._popup = tk.Toplevel(self)
+        self._popup.wm_overrideredirect(True)
+        try:
+            self._popup.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        border = tk.Frame(self._popup, bd=1, relief=tk.SOLID, bg="#9e9e9e")
+        border.pack(fill=tk.BOTH, expand=True)
+        self._listbox = tk.Listbox(
+            border, activestyle="none", exportselection=False,
+            highlightthickness=0, bd=0,
+            selectbackground="#2c7be5", selectforeground="white",
+        )
+        scrollbar = ttk.Scrollbar(border, orient="vertical", command=self._listbox.yview)
+        self._listbox.configure(yscrollcommand=scrollbar.set)
+        self._listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._listbox.bind("<ButtonRelease-1>", lambda e: self._accept_selection())
+        self._listbox.bind("<Motion>", self._on_list_motion)
+
+    def show_list(self, matches=None):
+        if matches is None:
+            matches = self.matches(self.get())
+        if not matches:
+            self.hide_list()
+            return
+        self._ensure_popup()
+        self._listbox.delete(0, tk.END)
+        for name in matches:
+            self._listbox.insert(tk.END, name)
+        self._listbox.selection_clear(0, tk.END)
+        self._listbox.selection_set(0)
+        self._listbox.activate(0)
+        self._listbox.see(0)
+        self._listbox.configure(height=min(len(matches), self.MAX_VISIBLE_ROWS))
+
+        self._popup.update_idletasks()
+        width = max(self.winfo_width(), 280)
+        height = self._popup.winfo_reqheight()
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height()
+        if y + height > self.winfo_screenheight() and self.winfo_rooty() - height > 0:
+            y = self.winfo_rooty() - height
+        self._popup.wm_geometry(f"{width}x{height}+{x}+{y}")
+        self._popup.deiconify()
+        self._popup.lift()
+
+    def hide_list(self):
+        if self._popup_alive():
+            self._popup.withdraw()
+
+    def _destroy_popup(self):
+        if self._popup_alive():
+            try:
+                self._popup.destroy()
+            except tk.TclError:
+                pass
+        self._popup = None
+        self._listbox = None
+
+    def _move_selection(self, delta):
+        if not self._list_visible():
+            self.show_list()
+            return
+        size = self._listbox.size()
+        if not size:
+            return
+        current = self._listbox.curselection()
+        index = (current[0] if current else 0) + delta
+        index = max(0, min(size - 1, index))
+        self._listbox.selection_clear(0, tk.END)
+        self._listbox.selection_set(index)
+        self._listbox.activate(index)
+        self._listbox.see(index)
+
+    def _accept_selection(self):
+        if not self._list_visible():
+            return "break"
+        selection = self._listbox.curselection()
+        if not selection:
+            return "break"
+        value = self._listbox.get(selection[0])
+        self.delete(0, tk.END)
+        self.insert(0, value)
+        self.icursor(tk.END)
+        self.hide_list()
+        if self.on_select:
+            self.on_select(value)
+        return "break"
+
+    # ── Eventos ──────────────────────────────────────────────────────────
+    def _on_key_release(self, event):
+        if event.keysym in self._IGNORED_KEYS:
+            return
+        if event.state & 0x4 and len(event.keysym) == 1:   # Ctrl+letra
+            return
+        self.show_list()
+
+    def _on_list_motion(self, event):
+        index = self._listbox.nearest(event.y)
+        if index >= 0:
+            self._listbox.selection_clear(0, tk.END)
+            self._listbox.selection_set(index)
+            self._listbox.activate(index)
+
+    def _on_down(self, event):
+        self._move_selection(1)
+        return "break"
+
+    def _on_up(self, event):
+        self._move_selection(-1)
+        return "break"
+
+    def _on_return(self, event):
+        if self._list_visible():
+            return self._accept_selection()
+        if self.on_commit:
+            self.on_commit()
+            return "break"
+        return None
+
+    def _on_tab(self, event, shift=False):
+        if self._list_visible():
+            self._accept_selection()
+            return "break"
+        if self.on_tab:
+            self.on_tab(shift)
+            return "break"
+        return None
+
+    def _on_escape(self, event):
+        if self._list_visible():
+            self.hide_list()
+            return "break"
+        if self.on_cancel:
+            self.on_cancel()
+            return "break"
+        return None
+
+    def _on_focus_out_event(self, event):
+        # Se retrasa para que un clic sobre la lista llegue a procesarse.
+        self.after(150, self._close_after_focus_out)
+
+    def _close_after_focus_out(self):
+        if self._pointer_over_popup():
+            return
+        self.hide_list()
+        if self.on_focus_out:
+            self.on_focus_out()
+
+    def _pointer_over_popup(self):
+        if not self._list_visible():
+            return False
+        try:
+            x, y = self._popup.winfo_pointerxy()
+            left, top = self._popup.winfo_rootx(), self._popup.winfo_rooty()
+            return (left <= x <= left + self._popup.winfo_width()
+                    and top <= y <= top + self._popup.winfo_height())
+        except tk.TclError:
+            return False
+
+
 class AmbiguityResolverDialog(tk.Toplevel):
     def __init__(self, parent, candidates_with_ibans, callback, manual_edit_callback=None):
         super().__init__(parent)
@@ -371,7 +641,13 @@ class EditDialog(tk.Toplevel):
         
         tk.Label(input_frame, text="Nombre:").grid(row=0, column=0, sticky="w")
         self.name_var = tk.StringVar(value=result_data['NOMBRE'])
-        tk.Entry(input_frame, textvariable=self.name_var, width=40).grid(row=0, column=1, pady=5)
+        self.name_entry = AutocompleteEntry(
+            input_frame, values=self._db_names(), textvariable=self.name_var,
+            on_select=self._on_provider_selected, width=40,
+        )
+        self.name_entry.grid(row=0, column=1, pady=5)
+        tk.Label(input_frame, text="(escribe y elige de la lista)",
+                 fg="gray").grid(row=0, column=2, sticky="w", padx=5)
         
         tk.Label(input_frame, text="IBAN:").grid(row=1, column=0, sticky="w")
         self.iban_var = tk.StringVar(value=result_data['IBAN'])
@@ -400,6 +676,24 @@ class EditDialog(tk.Toplevel):
         # Save Buttons
         tk.Button(btn_frame, text="💾 Guardar Cambios", command=self.save, bg="#c8e6c9").pack(side=tk.RIGHT, padx=5)
         tk.Button(btn_frame, text="Cancelar", command=self.destroy).pack(side=tk.RIGHT)
+
+    def _db_names(self):
+        """Nombres de proveedor disponibles en la base de datos."""
+        if self.db_df is None or 'NOMBRE' not in getattr(self.db_df, 'columns', []):
+            return []
+        return [str(n).strip() for n in self.db_df['NOMBRE'].dropna().tolist() if str(n).strip()]
+
+    def _on_provider_selected(self, name):
+        """Al elegir un proveedor se rellenan IBAN y concepto desde la BD."""
+        row = find_db_row(self.db_df, name)
+        if row is None:
+            return
+        iban = clean_db_value(row.get('IBAN'))
+        if iban:
+            self.iban_var.set(iban)
+        concepto = clean_db_value(row.get('CONCEPTO_NORMA'))
+        if concepto:
+            self.concepto_var.set(concepto)
 
     def open_pdf(self):
         try:
@@ -583,6 +877,9 @@ class SepaPreviewDialog(tk.Toplevel):
 
 
 class RemesaApp:
+    # Columnas que se pueden editar directamente en la tabla
+    EDITABLE_COLUMNS = ("nombre_db", "iban", "importe", "concepto")
+
     def __init__(self, root):
         self.root = root
         self.root.title("Generador de Remesas - CIEE Pro")
@@ -694,12 +991,27 @@ class RemesaApp:
                                           variable=self.filter_var, command=self.refresh_table)
         self.chk_filter.pack(side=tk.RIGHT, padx=10)
         
-        ttk.Label(btn_frame, text="(Doble clic en fila para Editar/Abrir PDF)", foreground="gray").pack(side=tk.RIGHT)
+        ttk.Label(btn_frame, text="(Doble clic en una celda para editarla)", foreground="gray").pack(side=tk.RIGHT)
 
         # Progress bar
         self.progress_var = tk.IntVar(value=0)
         self.progressbar = ttk.Progressbar(main_frame, variable=self.progress_var, maximum=100)
         self.progressbar.pack(fill=tk.X, pady=(0, 5))
+
+        # Búsqueda rápida sobre la tabla
+        search_frame = ttk.Frame(main_frame)
+        search_frame.pack(fill=tk.X)
+
+        ttk.Label(search_frame, text="🔎 Buscar:").pack(side=tk.LEFT)
+        self.search_var = tk.StringVar()
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=35)
+        self.search_entry.pack(side=tk.LEFT, padx=5)
+        self.search_var.trace_add("write", lambda *_: self.refresh_table(persist=False))
+        ttk.Button(search_frame, text="✖", width=3,
+                   command=lambda: self.search_var.set("")).pack(side=tk.LEFT)
+        ttk.Label(search_frame, foreground="gray",
+                  text="Ctrl+C/V: celdas · Ctrl+Mayús+C/V: proveedor · F2: editar"
+                  ).pack(side=tk.LEFT, padx=15)
 
         # Treeview
         tree_frame = ttk.Frame(main_frame)
@@ -707,7 +1019,7 @@ class RemesaApp:
         
         # Add hidden index column for proper mapping when filtered
         columns = ("idx", "archivo", "nombre_db", "iban", "importe", "concepto", "estado")
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
 
         # Hide the index column
         self.tree.column("idx", width=0, stretch=False)
@@ -741,15 +1053,28 @@ class RemesaApp:
         self.tree.tag_configure("error", background="#f8d7da")
         self.tree.tag_configure("warn", background="#fff3cd")
         
-        # Bind Double Click
+        # Doble clic: edita la celda; en Archivo/Estado abre la ventana de detalle
         self.tree.bind("<Double-1>", self.on_tree_double_click)
+        self.tree.bind("<Button-1>", self._on_tree_click, add="+")
 
-        # Bind right-click context menu and Delete key
+        # Menú contextual y teclas
         self.tree.bind("<Button-3>", self._show_context_menu)
         self.tree.bind("<Delete>", lambda e: self._delete_selected_row())
+        self.tree.bind("<F2>", lambda e: (self._edit_focused_cell(), "break")[1])
+        self.tree.bind("<Return>", lambda e: (self._edit_focused_cell(), "break")[1])
+        self.tree.bind("<Control-c>", self._copy_cells)
+        self.tree.bind("<Control-v>", self._paste_cells)
+        self.tree.bind("<Control-C>", self._copy_provider)
+        self.tree.bind("<Control-V>", self._paste_provider)
+        self.tree.bind("<Control-Shift-C>", self._copy_provider)
+        self.tree.bind("<Control-Shift-V>", self._paste_provider)
 
         self._context_menu = tk.Menu(self.root, tearoff=0)
-        self._context_menu.add_command(label="✏️  Editar", command=self._edit_selected_row)
+        self._context_menu.add_command(label="✏️  Editar celda (F2)", command=self._edit_focused_cell)
+        self._context_menu.add_command(label="🗔  Editar en ventana…", command=self._edit_selected_row)
+        self._context_menu.add_separator()
+        self._context_menu.add_command(label="📋  Copiar proveedor (Ctrl+Mayús+C)", command=self._copy_provider)
+        self._context_menu.add_command(label="📥  Pegar proveedor (Ctrl+Mayús+V)", command=self._paste_provider)
         self._context_menu.add_separator()
         self._context_menu.add_command(label="🗑️  Eliminar de la remesa", command=self._delete_selected_row)
 
@@ -757,6 +1082,16 @@ class RemesaApp:
         self.loaded_db_df = None
         self._sort_col = None
         self._sort_reverse = False
+
+        # Estado de edición en línea y portapapeles
+        self._item_by_index = {}
+        self._focus_column = "nombre_db"
+        self._provider_clipboard = None
+        self._editor = None
+        self._editor_item = None
+        self._editor_column = None
+        self._editor_index = None
+        self._committing = False
 
         # Restore previous session if available
         self.root.after(200, self.load_session)
@@ -964,57 +1299,64 @@ class RemesaApp:
         item_id = self.tree.identify_row(event.y)
         if not item_id:
             return
-        self.tree.selection_set(item_id)
+        if item_id not in self.tree.selection():
+            self.tree.selection_set(item_id)
+        self.tree.focus(item_id)
+        column_name = self._column_name(self.tree.identify_column(event.x))
+        if column_name in self.EDITABLE_COLUMNS:
+            self._focus_column = column_name
         self._context_menu.tk_popup(event.x_root, event.y_root)
 
     def _edit_selected_row(self):
-        item_id = self.tree.selection()
-        if not item_id:
+        items = self._selected_items()
+        index = self._row_index(items[0]) if items else None
+        if index is None:
             return
-        values = self.tree.item(item_id, 'values')
-        if not values:
-            return
-        actual_idx = int(values[0])
-        result_item = self.current_results[actual_idx]
+        self._open_row_dialog(index)
+
+    def _open_row_dialog(self, index):
+        result_item = self.current_results[index]
         if result_item.get('AMBIGUOUS_CANDIDATES'):
             self.show_ambiguity_resolver(result_item)
         else:
             EditDialog(self.root, result_item, self.loaded_db_df, self.on_edit_save)
 
     def _delete_selected_row(self):
-        item_id = self.tree.selection()
-        if not item_id:
+        indices = sorted(set(self._selected_indices()), reverse=True)
+        if not indices:
             return
-        values = self.tree.item(item_id, 'values')
-        if not values:
+        if len(indices) == 1:
+            question = (f"¿Eliminar '{self.current_results[indices[0]]['FILENAME']}' de la remesa?"
+                        "\n\nNo se borrará el archivo original.")
+        else:
+            question = (f"¿Eliminar {len(indices)} registros de la remesa?"
+                        "\n\nNo se borrarán los archivos originales.")
+        if not messagebox.askyesno("Eliminar registros", question, parent=self.root):
             return
-        actual_idx = int(values[0])
-        filename = self.current_results[actual_idx]['FILENAME']
-        if not messagebox.askyesno(
-            "Eliminar registro",
-            f"¿Eliminar '{filename}' de la remesa?\n\nNo se borrará el archivo original.",
-            parent=self.root
-        ):
-            return
-        del self.current_results[actual_idx]
+        for index in indices:
+            del self.current_results[index]
         self.refresh_table()
 
     def on_tree_double_click(self, event):
-        item_id = self.tree.selection()
-        if not item_id: return
-        
-        # Get the actual index from the tree item's values (first hidden column)
-        values = self.tree.item(item_id, 'values')
-        if not values: return
-        
-        actual_idx = int(values[0])  # First value is the hidden index
-        result_item = self.current_results[actual_idx]
-        
-        # Check if it's ambiguous and has candidates
-        if result_item.get('AMBIGUOUS_CANDIDATES'):
-            self.show_ambiguity_resolver(result_item)
-        else:
-            EditDialog(self.root, result_item, self.loaded_db_df, self.on_edit_save)
+        item_id = self.tree.identify_row(event.y)
+        if not item_id:
+            return "break"
+        column_name = self._column_name(self.tree.identify_column(event.x))
+
+        # Doble clic en Nombre/IBAN/Importe/Concepto → edición directa en la tabla
+        if column_name in self.EDITABLE_COLUMNS:
+            self.tree.selection_set(item_id)
+            self.tree.focus(item_id)
+            self._focus_column = column_name
+            self._begin_edit(item_id, column_name)
+            return "break"
+
+        # Doble clic en Archivo/Estado → ventana de detalle (o resolver ambigüedad)
+        index = self._row_index(item_id)
+        if index is not None:
+            self._open_row_dialog(index)
+        return "break"
+
     
     def show_ambiguity_resolver(self, result_item):
         candidates = result_item['AMBIGUOUS_CANDIDATES']
@@ -1112,13 +1454,17 @@ class RemesaApp:
             self.root.after(0, lambda: self.progress_var.set(0))
             self.root.after(0, lambda: self.btn_process.config(state="normal"))
 
-    def refresh_table(self):
+    def refresh_table(self, persist=True):
+        previous_selection = self._selected_indices()
+        self._close_editor()
         self.tree.delete(*self.tree.get_children())
+        self._item_by_index = {}
         if not self.current_results:
             self.lbl_status.config(text="Sin resultados.")
             return
 
         filter_problems = self.filter_var.get()
+        search = normalize_text(self.search_var.get())
         visible_count = 0
         problem_count = 0
 
@@ -1141,13 +1487,22 @@ class RemesaApp:
             # Skip OK entries if filter is active
             if filter_problems and not is_problem:
                 continue
+
+            # Caja de búsqueda: archivo, proveedor, IBAN, concepto o importe
+            if search:
+                haystack = normalize_text(" ".join([
+                    r['FILENAME'], r['NOMBRE'], r['IBAN'],
+                    str(r.get('CONCEPTO_NORMA', '')), f"{r['IMPORTE']:.2f}",
+                ]))
+                if search not in haystack:
+                    continue
             
             display_name = r['NOMBRE']
             if display_name.startswith("AMBIGUO:") or display_name.startswith("REVISAR:"):
                 pass
 
             # Include actual index as first (hidden) value
-            self.tree.insert("", "end", values=(
+            item_id = self.tree.insert("", "end", values=(
                 idx,  # Hidden index for proper mapping
                 r['FILENAME'],
                 display_name,
@@ -1156,7 +1511,11 @@ class RemesaApp:
                 r.get('CONCEPTO_NORMA', ''),
                 status_text
             ), tags=(tag,))
+            self._item_by_index[idx] = item_id
             visible_count += 1
+
+        # Mantener seleccionadas las mismas filas tras redibujar
+        self._select_indices(previous_selection)
         
         self.btn_save.config(state="normal")
         self.btn_sepa.config(state="normal")
@@ -1166,14 +1525,375 @@ class RemesaApp:
         total_str = f"{total_amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
         # Update status with counts
-        if filter_problems:
+        if search:
+            self.lbl_status.config(
+                text=f"Buscando '{self.search_var.get()}': {visible_count} de {len(self.current_results)} registros.")
+        elif filter_problems:
             self.lbl_status.config(text=f"Mostrando {visible_count} problemas de {len(self.current_results)} archivos.")
         else:
             ok_count = len(self.current_results) - problem_count
             self.lbl_status.config(text=f"Procesados {len(self.current_results)} archivos · ✅ {ok_count} | ⚠️ {problem_count} | Total: {total_str} €")
         
-        self.save_config()
-        self.save_session()
+        if persist:
+            self.save_config()
+            self.save_session()
+
+    # ── Utilidades de tabla ──────────────────────────────────────────────
+    def _column_name(self, column_id):
+        """'#3' → 'nombre_db'."""
+        try:
+            position = int(str(column_id).replace("#", "")) - 1
+        except (TypeError, ValueError):
+            return None
+        columns = list(self.tree["columns"])
+        return columns[position] if 0 <= position < len(columns) else None
+
+    def _column_id(self, column_name):
+        """'nombre_db' → '#3'."""
+        columns = list(self.tree["columns"])
+        return f"#{columns.index(column_name) + 1}"
+
+    def _row_index(self, item_id):
+        """Índice real en current_results de una fila de la tabla."""
+        if not item_id:
+            return None
+        values = self.tree.item(item_id, 'values')
+        if not values:
+            return None
+        try:
+            return int(values[0])
+        except (TypeError, ValueError):
+            return None
+
+    def _selected_items(self):
+        items = list(self.tree.selection())
+        if not items:
+            focused = self.tree.focus()
+            items = [focused] if focused else []
+        return sorted(items, key=self.tree.index)
+
+    def _selected_indices(self):
+        return [i for i in (self._row_index(item) for item in self._selected_items()) if i is not None]
+
+    def _select_indices(self, indices):
+        items = [self._item_by_index[i] for i in indices if i in self._item_by_index]
+        if not items:
+            return
+        self.tree.selection_set(items)
+        self.tree.focus(items[0])
+        self.tree.see(items[0])
+
+    def _on_tree_click(self, event):
+        """Recuerda la columna pulsada para copiar/pegar y editar con F2."""
+        if self.tree.identify_region(event.x, event.y) != "cell":
+            return
+        column_name = self._column_name(self.tree.identify_column(event.x))
+        if column_name in self.EDITABLE_COLUMNS:
+            self._focus_column = column_name
+
+    # ── Datos de la base de datos ────────────────────────────────────────
+    def _db_names(self):
+        """Lista de proveedores de la BD para el autocompletado."""
+        if self.loaded_db_df is None or 'NOMBRE' not in getattr(self.loaded_db_df, 'columns', []):
+            return []
+        return [str(n).strip() for n in self.loaded_db_df['NOMBRE'].dropna().tolist() if str(n).strip()]
+
+    def _fill_from_db(self, record, name):
+        """Rellena IBAN y concepto si el nombre existe tal cual en la BD."""
+        row = find_db_row(self.loaded_db_df, name)
+        if row is None:
+            return False
+        iban = clean_db_value(row.get('IBAN'))
+        if iban:
+            record['IBAN'] = iban
+        concepto = clean_db_value(row.get('CONCEPTO_NORMA'))
+        if concepto:
+            record['CONCEPTO_NORMA'] = concepto
+        return True
+
+    # ── Edición en línea ─────────────────────────────────────────────────
+    def _cell_text(self, record, column_name):
+        if column_name == "nombre_db":
+            return record['NOMBRE']
+        if column_name == "iban":
+            return record['IBAN']
+        if column_name == "importe":
+            return f"{record['IMPORTE']:.2f}"
+        if column_name == "concepto":
+            return record.get('CONCEPTO_NORMA', '')
+        return ""
+
+    def _apply_cell_value(self, index, column_name, value):
+        """Escribe el valor de una celda en current_results. Devuelve True si cambió."""
+        if not (0 <= index < len(self.current_results)):
+            return False
+        record = self.current_results[index]
+        value = str(value).strip()
+
+        if column_name == "nombre_db":
+            if not value or value == record['NOMBRE']:
+                return False
+            record['NOMBRE'] = value
+            record['AMBIGUOUS_CANDIDATES'] = None
+            self._fill_from_db(record, value)
+            return True
+
+        if column_name == "iban":
+            iban = value.upper().replace(" ", "")
+            if iban == record['IBAN']:
+                return False
+            record['IBAN'] = iban
+            return True
+
+        if column_name == "importe":
+            try:
+                amount = parse_amount(value)
+            except (ValueError, TypeError):
+                self.lbl_status.config(text=f"Importe no válido: {value}")
+                return False
+            if amount == record['IMPORTE']:
+                return False
+            record['IMPORTE'] = amount
+            return True
+
+        if column_name == "concepto":
+            if value == record.get('CONCEPTO_NORMA', ''):
+                return False
+            record['CONCEPTO_NORMA'] = value
+            return True
+
+        return False
+
+    def _begin_edit(self, item_id, column_name):
+        """Abre un editor encima de la celda, sin ventanas emergentes."""
+        if not item_id or column_name not in self.EDITABLE_COLUMNS:
+            return
+        index = self._row_index(item_id)
+        if index is None:
+            return
+        self._close_editor()
+
+        self.tree.see(item_id)
+        self.tree.update_idletasks()
+        bbox = self.tree.bbox(item_id, self._column_id(column_name))
+        if not bbox:
+            return
+        x, y, width, height = bbox
+        record = self.current_results[index]
+
+        if column_name == "nombre_db":
+            editor = AutocompleteEntry(self.tree, values=self._db_names(), bd=1, relief=tk.SOLID)
+            # Los callbacks llevan el editor concreto: si entretanto se abrió otro,
+            # una llamada retrasada (p. ej. el FocusOut) no debe afectarle.
+            editor.on_select = lambda name: self.root.after(1, lambda: self._commit_edit(source=editor))
+            editor.on_commit = lambda: self._commit_edit(source=editor)
+            editor.on_cancel = lambda: self._close_editor(source=editor)
+            editor.on_tab = lambda shift: self._commit_edit(move=-1 if shift else 1, source=editor)
+            editor.on_focus_out = lambda: self._commit_edit(source=editor)
+        else:
+            editor = tk.Entry(self.tree, bd=1, relief=tk.SOLID)
+
+            def commit(move=0):
+                self._commit_edit(move=move, source=editor)
+                return "break"
+
+            editor.bind("<Return>", lambda e: commit())
+            editor.bind("<KP_Enter>", lambda e: commit())
+            editor.bind("<Tab>", lambda e: commit(1))
+            editor.bind("<Shift-Tab>", lambda e: commit(-1))
+            editor.bind("<ISO_Left_Tab>", lambda e: commit(-1))
+            editor.bind("<Escape>", lambda e: (self._close_editor(source=editor), "break")[1])
+            editor.bind("<FocusOut>", lambda e: self._commit_edit(source=editor))
+
+        editor.insert(0, self._cell_text(record, column_name))
+        editor.select_range(0, tk.END)
+        editor.place(x=x, y=y, width=width, height=height)
+        editor.focus_set()
+
+        self._editor = editor
+        self._editor_item = item_id
+        self._editor_column = column_name
+        self._editor_index = index
+
+    def _close_editor(self, source=None):
+        if source is not None and source is not self._editor:
+            return
+        if self._editor is not None:
+            try:
+                self._editor.destroy()
+            except tk.TclError:
+                pass
+        self._editor = None
+        self._editor_item = None
+        self._editor_column = None
+        self._editor_index = None
+
+    def _commit_edit(self, move=0, source=None):
+        """Guarda la celda en edición y, si procede, salta a la siguiente."""
+        if self._editor is None or self._committing:
+            return
+        if source is not None and source is not self._editor:
+            return  # el editor ya se cerró o fue reemplazado por otro
+        self._committing = True
+        try:
+            value = self._editor.get()
+            column_name = self._editor_column
+            index = self._editor_index
+            self._close_editor()
+            self._apply_cell_value(index, column_name, value)
+            self.refresh_table()
+            self._select_indices([index])
+            if move:
+                self._edit_neighbour(index, column_name, move)
+        finally:
+            self._committing = False
+
+    def _edit_neighbour(self, index, column_name, step):
+        """Salta a la celda editable anterior/siguiente de la misma fila."""
+        columns = list(self.EDITABLE_COLUMNS)
+        position = columns.index(column_name) + step
+        if not (0 <= position < len(columns)):
+            return
+        item_id = self._item_by_index.get(index)
+        if item_id:
+            self._focus_column = columns[position]
+            self.root.after(1, lambda: self._begin_edit(item_id, columns[position]))
+
+    def _edit_focused_cell(self):
+        """F2 / Enter: edita la celda activa de la fila seleccionada."""
+        item_id = self.tree.focus() or (self._selected_items() or [None])[0]
+        if item_id:
+            self._begin_edit(item_id, self._focus_column)
+
+    # ── Portapapeles ─────────────────────────────────────────────────────
+    def _clipboard_set(self, text):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+
+    def _clipboard_get(self):
+        try:
+            return self.root.clipboard_get()
+        except tk.TclError:
+            return ""
+
+    def _copy_cells(self, event=None):
+        """Ctrl+C: copia la columna activa de las filas seleccionadas (compatible con Excel)."""
+        items = self._selected_items()
+        if not items:
+            return "break"
+        column_name = self._focus_column if self._focus_column in self.EDITABLE_COLUMNS else "nombre_db"
+        position = list(self.tree["columns"]).index(column_name)
+        lines = []
+        for item in items:
+            values = self.tree.item(item, 'values')
+            if values:
+                lines.append(str(values[position]))
+        if not lines:
+            return "break"
+        self._clipboard_set("\n".join(lines))
+        self.lbl_status.config(text=f"Copiado ({column_name}): {len(lines)} celda(s)")
+        return "break"
+
+    def _paste_cells(self, event=None):
+        """Ctrl+V: pega en la columna activa; admite varias filas/columnas desde Excel."""
+        text = self._clipboard_get()
+        if not text:
+            return "break"
+        items = self._selected_items()
+        if not items:
+            return "break"
+
+        lines = [l for l in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if not lines:
+            return "break"
+
+        # Un solo valor y varias filas seleccionadas → se replica en todas
+        if len(lines) == 1 and "\t" not in lines[0] and len(items) > 1:
+            lines = lines * len(items)
+
+        targets = items if len(lines) <= len(items) else self._rows_from(items[0], len(lines))
+        columns = list(self.tree["columns"])
+        start = columns.index(self._focus_column if self._focus_column in self.EDITABLE_COLUMNS else "nombre_db")
+
+        changed = 0
+        for line, item in zip(lines, targets):
+            index = self._row_index(item)
+            if index is None:
+                continue
+            for offset, cell in enumerate(line.split("\t")):
+                position = start + offset
+                if position >= len(columns):
+                    break
+                column_name = columns[position]
+                if column_name in self.EDITABLE_COLUMNS and self._apply_cell_value(index, column_name, cell):
+                    changed += 1
+        if changed:
+            indices = [self._row_index(i) for i in targets]
+            self.refresh_table()
+            self._select_indices([i for i in indices if i is not None])
+        self.lbl_status.config(text=f"Pegado: {changed} celda(s) actualizada(s)")
+        return "break"
+
+    def _rows_from(self, item_id, count):
+        """Devuelve 'count' filas visibles a partir de item_id (incluida)."""
+        children = list(self.tree.get_children())
+        try:
+            start = children.index(item_id)
+        except ValueError:
+            start = 0
+        return children[start:start + count]
+
+    def _copy_provider(self, event=None):
+        """Ctrl+Mayús+C: copia el proveedor completo (nombre + IBAN + concepto)."""
+        items = self._selected_items()
+        index = self._row_index(items[0]) if items else None
+        if index is None:
+            return "break"
+        record = self.current_results[index]
+        self._provider_clipboard = {
+            'NOMBRE': record['NOMBRE'],
+            'IBAN': record['IBAN'],
+            'CONCEPTO_NORMA': record.get('CONCEPTO_NORMA', ''),
+        }
+        self._clipboard_set("\t".join([
+            self._provider_clipboard['NOMBRE'],
+            self._provider_clipboard['IBAN'],
+            self._provider_clipboard['CONCEPTO_NORMA'],
+        ]))
+        self.lbl_status.config(text=f"Proveedor copiado: {record['NOMBRE']}")
+        return "break"
+
+    def _paste_provider(self, event=None):
+        """Ctrl+Mayús+V: aplica el proveedor copiado a todas las filas seleccionadas."""
+        provider = self._provider_clipboard
+        if not provider:
+            parts = self._clipboard_get().split("\t")
+            if len(parts) >= 2:
+                provider = {
+                    'NOMBRE': parts[0].strip(),
+                    'IBAN': parts[1].strip(),
+                    'CONCEPTO_NORMA': parts[2].strip() if len(parts) > 2 else '',
+                }
+        if not provider or not provider.get('NOMBRE'):
+            self.lbl_status.config(text="No hay ningún proveedor copiado (usa Ctrl+Mayús+C).")
+            return "break"
+
+        indices = self._selected_indices()
+        if not indices:
+            return "break"
+        for index in indices:
+            record = self.current_results[index]
+            record['NOMBRE'] = provider['NOMBRE']
+            record['IBAN'] = provider['IBAN']
+            if provider.get('CONCEPTO_NORMA'):
+                record['CONCEPTO_NORMA'] = provider['CONCEPTO_NORMA']
+            record['AMBIGUOUS_CANDIDATES'] = None
+        self.refresh_table()
+        self._select_indices(indices)
+        self.lbl_status.config(text=f"Proveedor '{provider['NOMBRE']}' aplicado a {len(indices)} fila(s).")
+        return "break"
 
     def save_results(self):
         if not self.current_results: return

@@ -100,6 +100,21 @@ PDF / Excel expense reports
       Bank import
 ```
 
+### Editing the results table
+
+| Action | Shortcut |
+| --- | --- |
+| Edit a cell in place (name, IBAN, amount, concepto) | Double-click the cell, or `F2` / `Enter` |
+| Provider autocomplete | Start typing in the name cell: providers beginning with those letters appear first and the list narrows with every letter. `↑` `↓` to move, `Enter` to pick, `Esc` to close |
+| Move to the next / previous cell | `Tab` / `Shift+Tab` |
+| Copy the selected cells | `Ctrl+C` (tab/newline separated, so it pastes into Excel) |
+| Paste into the selected cells | `Ctrl+V` (a single value fills every selected row; several lines fill consecutive rows) |
+| Copy / paste a whole provider (name + IBAN + concepto) | `Ctrl+Shift+C` / `Ctrl+Shift+V` |
+| Remove rows from the remittance | `Del` (works on a multiple selection) |
+| Open the detail window | Double-click the *File* or *Status* column, or use the right-click menu |
+
+Picking a provider from the autocomplete list fills in its IBAN and concepto from the database.
+
 ### Building from Source
 
 The project uses PyInstaller to create standalone executables. GitHub Actions builds binaries automatically on every push to `main` that modifies `process_remesa.py` or `RemesaPro.spec`.
@@ -211,6 +226,21 @@ PDFs / Excel con notas de gasto
               ↓
          Importación bancaria
 ```
+
+### Edición de la tabla de resultados
+
+| Acción | Atajo |
+| --- | --- |
+| Editar una celda en la propia tabla (nombre, IBAN, importe, concepto) | Doble clic en la celda, o `F2` / `Intro` |
+| Autocompletado de proveedores | Al escribir en la celda de nombre aparecen primero los proveedores que empiezan por esas letras y la lista se reduce con cada letra. `↑` `↓` para moverse, `Intro` para elegir y `Esc` para cerrar |
+| Ir a la celda siguiente / anterior | `Tab` / `Mayús+Tab` |
+| Copiar las celdas seleccionadas | `Ctrl+C` (separado por tabuladores y saltos de línea, se pega en Excel) |
+| Pegar en las celdas seleccionadas | `Ctrl+V` (un solo valor se replica en todas las filas seleccionadas; varias líneas rellenan filas consecutivas) |
+| Copiar / pegar el proveedor completo (nombre + IBAN + concepto) | `Ctrl+Mayús+C` / `Ctrl+Mayús+V` |
+| Quitar filas de la remesa | `Supr` (admite selección múltiple) |
+| Abrir la ventana de detalle | Doble clic en la columna *Archivo* o *Estado*, o menú del botón derecho |
+
+Al elegir un proveedor en la lista de autocompletado se rellenan su IBAN y su concepto desde la base de datos.
 
 ### Compilación desde el código fuente
 
