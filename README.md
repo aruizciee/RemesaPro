@@ -23,6 +23,7 @@ RemesaPro is a desktop application that automates the processing of expense repo
 - **Intelligent provider matching** – Fuzzy-matches extracted names against a provider database using normalized text comparison
 - **IBAN lookup** – Automatically retrieves each provider's IBAN from the database
 - **SEPA XML generation** – Produces valid `pain.001.001.03` credit transfer files ready for bank import
+- **Payment validation** – Every IBAN is checked (format, country length and mod-97 check digit), amounts of 0 € are held back, debtor details are verified before anything is written, accented and special characters are converted to the SEPA character set, and repeated payments (same IBAN and amount) are flagged
 - **Excel remittance output** – Timestamped Excel file with color-coded status (green = OK, yellow = ambiguous, red = error)
 - **Interactive disambiguation** – GUI dialogs to manually resolve ambiguous matches or edit data
 - **Provider autocomplete** – Start typing a name and the matching providers from the database appear; picking one fills in the IBAN and concepto
@@ -115,6 +116,16 @@ PDF / Excel expense reports
 
 Picking a provider from the autocomplete list fills in its IBAN and concepto from the database.
 
+Each row shows why it cannot be paid, and only `OK` rows reach the SEPA file:
+
+| Status | Meaning |
+| --- | --- |
+| `OK` | Valid IBAN and a positive amount — it will be paid |
+| `ERROR` | The provider was not found in the database |
+| `AMBIGUO` | Several providers match: pick one |
+| `IBAN NO VÁLIDO` | The IBAN fails the check digit, the country length or the format |
+| `SIN IMPORTE` | The amount is 0 € or negative |
+
 ### Building from Source
 
 The project uses PyInstaller to create standalone executables. GitHub Actions builds binaries automatically on every push to `main` that modifies `process_remesa.py` or `RemesaPro.spec`.
@@ -150,6 +161,7 @@ RemesaPro es una aplicación de escritorio que automatiza el procesamiento de no
 - **Búsqueda inteligente de proveedores** – Coincidencia aproximada de nombres contra la base de datos mediante comparación de texto normalizado
 - **Búsqueda de IBAN** – Recupera automáticamente el IBAN de cada proveedor desde la base de datos
 - **Generación de XML SEPA** – Produce ficheros de transferencia de crédito `pain.001.001.03` válidos para importar en el banco
+- **Validación de los pagos** – Comprueba cada IBAN (formato, longitud del país y dígito de control mod 97), retiene los importes de 0 €, verifica los datos del ordenante antes de escribir nada, adapta acentos y símbolos al juego de caracteres SEPA y avisa de posibles pagos duplicados (mismo IBAN e importe)
 - **Remesa Excel de salida** – Archivo Excel con marca de tiempo y estado codificado por colores (verde = OK, amarillo = ambiguo, rojo = error)
 - **Desambiguación interactiva** – Diálogos GUI para resolver manualmente coincidencias ambiguas o editar datos
 - **Autocompletado de proveedores** – Al escribir un nombre aparecen los proveedores de la base de datos que coinciden; al elegir uno se rellenan el IBAN y el concepto
@@ -241,6 +253,16 @@ PDFs / Excel con notas de gasto
 | Abrir la ventana de detalle | Doble clic en la columna *Archivo* o *Estado*, o menú del botón derecho |
 
 Al elegir un proveedor en la lista de autocompletado se rellenan su IBAN y su concepto desde la base de datos.
+
+Cada fila indica por qué no se puede pagar, y solo las que están en `OK` llegan al fichero SEPA:
+
+| Estado | Significado |
+| --- | --- |
+| `OK` | IBAN válido e importe positivo: se paga |
+| `ERROR` | No se encontró el proveedor en la base de datos |
+| `AMBIGUO` | Hay varios proveedores posibles: elige uno |
+| `IBAN NO VÁLIDO` | El IBAN falla el dígito de control, la longitud del país o el formato |
+| `SIN IMPORTE` | El importe es 0 € o negativo |
 
 ### Compilación desde el código fuente
 

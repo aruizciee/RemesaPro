@@ -30,6 +30,7 @@ APP_VERSION = 7  # Matches GitHub build number
 DEFAULT_DB_FILE = "Base datos IBAN proveedores.xlsx"
 TEMPLATE_FILE = "FA25_REMESA PAGOS SANTANDER_.xlsx"
 OUTPUT_PREFIX = "REMESA_GENERADA_"
+DEFAULT_CONCEPT = "NOTA DE GASTOS"  # concepto que ve el proveedor si la BD no tiene uno
 CONFIG_FILE = "remesa_config.json"
 SESSION_FILE = "remesa_session.json"
 LOGO_FILE = "ciee logo.png"
@@ -104,6 +105,177 @@ def normalize_text(text):
     if not isinstance(text, str): return ""
     text = text.lower().strip()
     return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
+
+# ── Validación de IBAN ────────────────────────────────────────────────────────
+# Longitud oficial del IBAN por país (registro ISO 13616).
+IBAN_COUNTRY_LENGTHS = {
+    "AD": 24, "AE": 23, "AL": 28, "AT": 20, "AZ": 28, "BA": 20, "BE": 16, "BG": 22,
+    "BH": 22, "BR": 29, "BY": 28, "CH": 21, "CR": 22, "CY": 28, "CZ": 24, "DE": 22,
+    "DK": 18, "DO": 28, "EE": 20, "EG": 29, "ES": 24, "FI": 18, "FO": 18, "FR": 27,
+    "GB": 22, "GE": 22, "GI": 23, "GL": 18, "GR": 27, "GT": 28, "HR": 21, "HU": 28,
+    "IE": 22, "IL": 23, "IQ": 23, "IS": 26, "IT": 27, "JO": 30, "KW": 30, "KZ": 20,
+    "LB": 28, "LC": 32, "LI": 21, "LT": 20, "LU": 20, "LV": 21, "LY": 25, "MC": 27,
+    "MD": 24, "ME": 22, "MK": 19, "MR": 27, "MT": 31, "MU": 30, "NL": 18, "NO": 15,
+    "PK": 24, "PL": 28, "PS": 29, "PT": 25, "QA": 29, "RO": 24, "RS": 22, "SA": 24,
+    "SC": 31, "SE": 24, "SI": 19, "SK": 24, "SM": 27, "ST": 25, "SV": 28, "TL": 23,
+    "TN": 24, "TR": 26, "UA": 29, "VA": 22, "VG": 24, "XK": 20,
+}
+
+# Marcadores que la aplicación escribe en la columna IBAN cuando no hay uno real
+IBAN_PLACEHOLDERS = ("", "NO ENCONTRADO", "AMBIGUO")
+
+_RE_IBAN_FORMAT = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$")
+
+
+def normalize_iban(value):
+    """Deja el IBAN en mayúsculas y sin espacios ni separadores."""
+    if value is None:
+        return ""
+    return re.sub(r"[\s.\-]", "", str(value)).upper()
+
+
+def iban_is_valid(value):
+    """Valida un IBAN: formato, longitud del país y dígito de control (mod 97)."""
+    iban = normalize_iban(value)
+    if not iban or iban in IBAN_PLACEHOLDERS or not _RE_IBAN_FORMAT.match(iban):
+        return False
+    expected_length = IBAN_COUNTRY_LENGTHS.get(iban[:2])
+    if expected_length is not None and len(iban) != expected_length:
+        return False
+    # Se mueven los 4 primeros caracteres al final y cada letra pasa a número (A=10…Z=35)
+    rearranged = iban[4:] + iban[:4]
+    try:
+        digits = "".join(str(int(char, 36)) for char in rearranged)
+    except ValueError:
+        return False
+    return int(digits) % 97 == 1
+
+
+def iban_error(value):
+    """Devuelve el motivo por el que un IBAN no es válido, o None si lo es."""
+    iban = normalize_iban(value)
+    if not iban or iban in IBAN_PLACEHOLDERS:
+        return "falta el IBAN"
+    if not _RE_IBAN_FORMAT.match(iban):
+        return "el formato no es un IBAN (debe ser 2 letras + 2 dígitos + cuenta)"
+    expected_length = IBAN_COUNTRY_LENGTHS.get(iban[:2])
+    if expected_length is None:
+        return f"el código de país '{iban[:2]}' no existe"
+    if len(iban) != expected_length:
+        return f"un IBAN de {iban[:2]} tiene {expected_length} caracteres y este tiene {len(iban)}"
+    if not iban_is_valid(iban):
+        return "el dígito de control no cuadra (suele ser una errata)"
+    return None
+
+
+# ── Juego de caracteres admitido por SEPA ─────────────────────────────────────
+# Los bancos rechazan caracteres fuera del subconjunto latino básico de SEPA.
+SEPA_ALLOWED_CHARS = set(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    "/-?:().,'+ "
+)
+SEPA_CHAR_REPLACEMENTS = {
+    "&": "y", "€": "EUR", "$": "USD", "%": "por ciento", "@": "(at)",
+    "_": "-", "\\": "/", "|": "/", "*": "-", "#": "-", "=": "-",
+    "\"": "'", "«": "'", "»": "'", "“": "'", "”": "'", "‘": "'", "’": "'",
+    "–": "-", "—": "-", "º": "o", "ª": "a", "ß": "ss", "æ": "ae", "Æ": "AE",
+    "ø": "o", "Ø": "O", "å": "a", "Å": "A", "œ": "oe", "Œ": "OE",
+}
+
+
+def sepa_text(value, max_length, fallback=""):
+    """Adapta un texto al juego de caracteres SEPA (sin acentos ni símbolos raros)."""
+    text = "" if value is None else str(value)
+    # Se separan los acentos y se descartan: á→a, ñ→n, ç→c…
+    text = "".join(
+        char for char in unicodedata.normalize('NFD', text)
+        if unicodedata.category(char) != 'Mn'
+    )
+    converted = []
+    for char in text:
+        if char in SEPA_ALLOWED_CHARS:
+            converted.append(char)
+        elif char in SEPA_CHAR_REPLACEMENTS:
+            converted.append(SEPA_CHAR_REPLACEMENTS[char])
+        else:
+            converted.append(" ")
+    cleaned = re.sub(r"\s+", " ", "".join(converted)).strip()
+    if not cleaned:
+        cleaned = fallback
+    return cleaned[:max_length].strip()
+
+
+# ── Estado de cada línea de la remesa ─────────────────────────────────────────
+# (estado, color de la fila, es un problema, motivo)
+def payment_issue(record):
+    """Clasifica una línea: OK, o el problema que impide pagarla."""
+    name = str(record.get('NOMBRE', ''))
+    iban = str(record.get('IBAN', ''))
+    try:
+        amount = float(record.get('IMPORTE', 0) or 0)
+    except (TypeError, ValueError):
+        amount = 0.0
+
+    if "ERROR" in name or normalize_iban(iban) == "NOENCONTRADO" or not iban.strip():
+        return ("ERROR", "error", True, "no se encontró el proveedor en la base de datos")
+    if iban.strip().upper() == "AMBIGUO":
+        return ("AMBIGUO", "warn", True, "hay varios proveedores posibles: elige uno")
+
+    reason = iban_error(iban)
+    if reason:
+        return ("IBAN NO VÁLIDO", "error", True, f"IBAN incorrecto: {reason}")
+    if amount <= 0:
+        return ("SIN IMPORTE", "warn", True, "el importe es 0 € o negativo")
+    return ("OK", "ok", False, None)
+
+
+def is_payable(record):
+    """True si la línea puede incluirse en el fichero SEPA."""
+    return not payment_issue(record)[2]
+
+
+def find_duplicate_payments(results):
+    """Agrupa pagos que se repiten (mismo IBAN e importe) para avisar de dobles pagos."""
+    groups = {}
+    for record in results:
+        if not is_payable(record):
+            continue
+        key = (normalize_iban(record.get('IBAN')), round(float(record.get('IMPORTE', 0)), 2))
+        groups.setdefault(key, []).append(record)
+    return [(key, rows) for key, rows in groups.items() if len(rows) > 1]
+
+
+# ── Datos del ordenante ───────────────────────────────────────────────────────
+SEPA_REQUIRED_FIELDS = {
+    "sepa_nombre": "Nombre de la empresa",
+    "sepa_cif": "CIF/NIF",
+    "sepa_iban": "IBAN de la empresa",
+}
+_RE_BIC = re.compile(r"^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$")
+
+
+def sepa_config_errors(config):
+    """Comprueba los datos del ordenante. Devuelve la lista de problemas encontrados."""
+    cfg = {**SEPA_DEFAULTS, **{k: v for k, v in (config or {}).items() if k.startswith("sepa_")}}
+    errors = []
+    for key, label in SEPA_REQUIRED_FIELDS.items():
+        if not str(cfg.get(key, "")).strip():
+            errors.append(f"Falta «{label}».")
+    debtor_iban = cfg.get("sepa_iban", "")
+    if str(debtor_iban).strip():
+        reason = iban_error(debtor_iban)
+        if reason:
+            errors.append(f"El IBAN de la empresa no es válido: {reason}.")
+    bic = normalize_iban(cfg.get("sepa_bic", ""))
+    if bic and not _RE_BIC.match(bic):
+        errors.append("El BIC/SWIFT debe tener 8 u 11 caracteres (p. ej. BSCHESMMXXX).")
+    pais = str(cfg.get("sepa_pais", "")).strip().upper()
+    if pais and len(pais) != 2:
+        errors.append("El país debe ser el código ISO de 2 letras (p. ej. ES).")
+    return errors
+
 
 def clean_db_value(value):
     """Convierte un valor de la BD en texto limpio ('' si está vacío o es NaN)."""
@@ -498,11 +670,19 @@ class SepaConfigDialog(tk.Toplevel):
         self.destroy()
 
 
+class SepaConfigError(ValueError):
+    """Los datos del ordenante están incompletos o son incorrectos."""
+
+
 def generate_sepa_xml(results, config, output_path=None, exec_date=None):
     """Generate SEPA Credit Transfer XML (pain.001.001.03) from remesa results."""
-    # Filter only valid transactions (with IBAN)
-    valid = [r for r in results
-             if r['IBAN'] and r['IBAN'] not in ('NO ENCONTRADO', 'AMBIGUO', '')]
+    # Sin unos datos del ordenante correctos el banco rechaza el fichero entero
+    config_errors = sepa_config_errors(config)
+    if config_errors:
+        raise SepaConfigError("\n".join(config_errors))
+
+    # Solo se pagan las líneas con IBAN válido (dígito de control) e importe positivo
+    valid = [r for r in results if is_payable(r)]
 
     if not valid:
         return None
@@ -526,7 +706,7 @@ def generate_sepa_xml(results, config, output_path=None, exec_date=None):
     SubElement(grp, "NbOfTxs").text = nb_txs
     SubElement(grp, "CtrlSum").text = ctrl_sum
     initg = SubElement(grp, "InitgPty")
-    SubElement(initg, "Nm").text = cfg["sepa_nombre"]
+    SubElement(initg, "Nm").text = sepa_text(cfg["sepa_nombre"], 70)
     org_id = SubElement(SubElement(SubElement(initg, "Id"), "OrgId"), "Othr")
     SubElement(org_id, "Id").text = cfg["sepa_cif"]
 
@@ -545,24 +725,24 @@ def generate_sepa_xml(results, config, output_path=None, exec_date=None):
 
     # Debtor
     dbtr = SubElement(pmt, "Dbtr")
-    SubElement(dbtr, "Nm").text = cfg["sepa_nombre"]
+    SubElement(dbtr, "Nm").text = sepa_text(cfg["sepa_nombre"], 70)
     addr = SubElement(dbtr, "PstlAdr")
-    SubElement(addr, "PstCd").text = cfg["sepa_cp"]
-    SubElement(addr, "TwnNm").text = cfg["sepa_ciudad"]
-    SubElement(addr, "CtrySubDvsn").text = cfg["sepa_provincia"]
-    SubElement(addr, "Ctry").text = cfg["sepa_pais"]
-    SubElement(addr, "AdrLine").text = cfg["sepa_direccion"]
+    SubElement(addr, "PstCd").text = sepa_text(cfg["sepa_cp"], 16)
+    SubElement(addr, "TwnNm").text = sepa_text(cfg["sepa_ciudad"], 35)
+    SubElement(addr, "CtrySubDvsn").text = sepa_text(cfg["sepa_provincia"], 35)
+    SubElement(addr, "Ctry").text = cfg["sepa_pais"].strip().upper()
+    SubElement(addr, "AdrLine").text = sepa_text(cfg["sepa_direccion"], 70)
     dbtr_org = SubElement(SubElement(SubElement(dbtr, "Id"), "OrgId"), "Othr")
     SubElement(dbtr_org, "Id").text = cfg["sepa_cif"]
 
     # Debtor Account
     dbtr_acct = SubElement(pmt, "DbtrAcct")
-    SubElement(SubElement(dbtr_acct, "Id"), "IBAN").text = cfg["sepa_iban"]
+    SubElement(SubElement(dbtr_acct, "Id"), "IBAN").text = normalize_iban(cfg["sepa_iban"])
     SubElement(dbtr_acct, "Ccy").text = "EUR"
 
     # Debtor Agent (Bank)
     dbtr_agt = SubElement(pmt, "DbtrAgt")
-    SubElement(SubElement(dbtr_agt, "FinInstnId"), "BIC").text = cfg["sepa_bic"]
+    SubElement(SubElement(dbtr_agt, "FinInstnId"), "BIC").text = normalize_iban(cfg["sepa_bic"])
 
     SubElement(pmt, "ChrgBr").text = "SLEV"
 
@@ -585,20 +765,22 @@ def generate_sepa_xml(results, config, output_path=None, exec_date=None):
         for prefix in ("REVISAR: ", "AMBIGUO: "):
             if clean_name.startswith(prefix):
                 clean_name = clean_name[len(prefix):]
-        SubElement(cdtr, "Nm").text = clean_name[:70]  # SEPA max 70 chars
+        # Máximo 70 caracteres y solo el juego de caracteres admitido por SEPA
+        SubElement(cdtr, "Nm").text = sepa_text(clean_name, 70, fallback="BENEFICIARIO")
 
         cdtr_addr = SubElement(cdtr, "PstlAdr")
         # Derive country from IBAN prefix (first 2 chars)
-        iban = r['IBAN'].replace(" ", "")
-        country = iban[:2].upper() if len(iban) >= 2 else cfg["sepa_pais"]
+        iban = normalize_iban(r['IBAN'])
+        country = iban[:2] if len(iban) >= 2 else cfg["sepa_pais"]
         SubElement(cdtr_addr, "Ctry").text = country
 
         cdtr_acct = SubElement(tx, "CdtrAcct")
         SubElement(SubElement(cdtr_acct, "Id"), "IBAN").text = iban
 
         rmt = SubElement(tx, "RmtInf")
-        concept = r.get('CONCEPTO_NORMA', f"Pago-CIEE")
-        SubElement(rmt, "Ustrd").text = concept[:140]  # SEPA max 140 chars
+        concept = clean_db_value(r.get('CONCEPTO_NORMA')) or DEFAULT_CONCEPT
+        # Máximo 140 caracteres, nunca vacío y sin caracteres que el banco rechace
+        SubElement(rmt, "Ustrd").text = sepa_text(concept, 140, fallback=DEFAULT_CONCEPT)
 
     # Write XML
     if output_path is None:
@@ -1009,9 +1191,9 @@ class RemesaApp:
         self.search_var.trace_add("write", lambda *_: self.refresh_table(persist=False))
         ttk.Button(search_frame, text="✖", width=3,
                    command=lambda: self.search_var.set("")).pack(side=tk.LEFT)
-        ttk.Label(search_frame, foreground="gray",
-                  text="Ctrl+C/V: celdas · Ctrl+Mayús+C/V: proveedor · F2: editar"
-                  ).pack(side=tk.LEFT, padx=15)
+        self.HINT_TEXT = "Ctrl+C/V: celdas · Ctrl+Mayús+C/V: proveedor · F2: editar"
+        self.lbl_hint = ttk.Label(search_frame, text=self.HINT_TEXT, foreground="gray")
+        self.lbl_hint.pack(side=tk.LEFT, padx=15)
 
         # Treeview
         tree_frame = ttk.Frame(main_frame)
@@ -1036,8 +1218,8 @@ class RemesaApp:
         self.tree.column("nombre_db", width=200)
         self.tree.column("iban", width=200)
         self.tree.column("importe", width=80, anchor="e")
-        self.tree.column("concepto", width=200)
-        self.tree.column("estado", width=80)
+        self.tree.column("concepto", width=180)
+        self.tree.column("estado", width=120)
         
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
@@ -1056,6 +1238,7 @@ class RemesaApp:
         # Doble clic: edita la celda; en Archivo/Estado abre la ventana de detalle
         self.tree.bind("<Double-1>", self.on_tree_double_click)
         self.tree.bind("<Button-1>", self._on_tree_click, add="+")
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select, add="+")
 
         # Menú contextual y teclas
         self.tree.bind("<Button-3>", self._show_context_menu)
@@ -1105,8 +1288,8 @@ class RemesaApp:
             "nombre_db":  lambda r: r['NOMBRE'].lower(),
             "iban":       lambda r: r['IBAN'].lower(),
             "importe":    lambda r: r['IMPORTE'],
-            "concepto":   lambda r: r.get('CONCEPTO_NORMA', '').lower(),
-            "estado":     lambda r: (0 if 'NO ENCONTRADO' not in r['IBAN'] and 'AMBIGUO' not in r['IBAN'] else (2 if 'NO ENCONTRADO' in r['IBAN'] else 1)),
+            "concepto":   lambda r: clean_db_value(r.get('CONCEPTO_NORMA')).lower(),
+            "estado":     lambda r: ("OK", "SIN IMPORTE", "AMBIGUO", "IBAN NO VÁLIDO", "ERROR").index(payment_issue(r)[0]),
         }
         col_labels = {
             "archivo": "Archivo PDF", "nombre_db": "Nombre Detectado",
@@ -1371,7 +1554,8 @@ class RemesaApp:
             if self.loaded_db_df is not None:
                 match = self.loaded_db_df[self.loaded_db_df['NOMBRE'] == name]
                 if not match.empty:
-                    result_item['CONCEPTO_NORMA'] = match.iloc[0].get('CONCEPTO_NORMA', result_item['CONCEPTO_NORMA'])
+                    result_item['CONCEPTO_NORMA'] = (clean_db_value(match.iloc[0].get('CONCEPTO_NORMA'))
+                                                     or result_item['CONCEPTO_NORMA'])
             
             # Refresh table
             self.refresh_table()
@@ -1389,7 +1573,39 @@ class RemesaApp:
         # Refresh GUI
         self.refresh_table()
 
+    def _warn_invalid_db_ibans(self):
+        """Avisa (sin bloquear) de los IBAN incorrectos que haya en la base de datos."""
+        if self.loaded_db_df is None:
+            return
+        wrong = []
+        for _, row in self.loaded_db_df.iterrows():
+            iban = clean_db_value(row.get('IBAN'))
+            name = clean_db_value(row.get('NOMBRE'))
+            if not name:
+                continue
+            reason = iban_error(iban)
+            if reason:
+                wrong.append(f"• {name}: {reason}")
+        if not wrong:
+            return
+        shown = "\n".join(wrong[:12])
+        if len(wrong) > 12:
+            shown += f"\n… y {len(wrong) - 12} más"
+        messagebox.showwarning(
+            "IBAN incorrectos en la base de datos",
+            f"{len(wrong)} proveedor(es) de la base de datos tienen un IBAN que el banco "
+            f"rechazaría:\n\n{shown}\n\n"
+            "Sus líneas aparecerán marcadas y no se incluirán en el fichero SEPA.",
+            parent=self.root)
+
     def save_new_db_entry(self, name, iban):
+        reason = iban_error(iban)
+        if reason and not messagebox.askyesno(
+            "IBAN no válido",
+            f"El IBAN de «{name}» no es válido: {reason}.\n\n"
+            "¿Guardarlo igualmente en la base de datos?",
+            parent=self.root):
+            return
         try:
             # Add to memory DF
             new_row = {"NOMBRE": name, "IBAN": iban, "CONCEPTO_NORMA": "Añadido Manualmente"}
@@ -1441,6 +1657,7 @@ class RemesaApp:
             if self.loaded_db_df is None:
                 messagebox.showerror("Error", "Error cargando BD.")
                 return
+            self.root.after(0, self._warn_invalid_db_ibans)
 
             def progress_cb(current, total):
                 self.root.after(0, lambda c=current, t=total: self._update_progress(c, t))
@@ -1469,19 +1686,8 @@ class RemesaApp:
         problem_count = 0
 
         for idx, r in enumerate(self.current_results):
-            tag = "ok"
-            status_text = "OK"
-            is_problem = False
-            
-            if "NO ENCONTRADO" in r['IBAN'] or "ERROR" in r['NOMBRE']:
-                tag = "error"
-                status_text = "ERROR"
-                is_problem = True
-                problem_count += 1
-            elif "AMBIGUO" in r['IBAN']:
-                tag = "warn"
-                status_text = "AMBIGUO"
-                is_problem = True
+            status_text, tag, is_problem, _reason = payment_issue(r)
+            if is_problem:
                 problem_count += 1
             
             # Skip OK entries if filter is active
@@ -1582,6 +1788,16 @@ class RemesaApp:
         self.tree.selection_set(items)
         self.tree.focus(items[0])
         self.tree.see(items[0])
+
+    def _on_tree_select(self, event=None):
+        """Explica junto a la búsqueda por qué la línea seleccionada no se puede pagar."""
+        indices = self._selected_indices()
+        if len(indices) == 1:
+            _status, _tag, is_problem, reason = payment_issue(self.current_results[indices[0]])
+            if is_problem and reason:
+                self.lbl_hint.config(text="⚠️  " + reason[0].upper() + reason[1:], foreground="#c0392b")
+                return
+        self.lbl_hint.config(text=self.HINT_TEXT, foreground="gray")
 
     def _on_tree_click(self, event):
         """Recuerda la columna pulsada para copiar/pegar y editar con F2."""
@@ -1904,19 +2120,66 @@ class RemesaApp:
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
+    def _check_sepa_config(self):
+        """Bloquea la generación si los datos del ordenante no son correctos."""
+        errors = sepa_config_errors(self.config)
+        if not errors:
+            return True
+        messagebox.showerror(
+            "Datos del ordenante incompletos",
+            "No se puede generar el fichero SEPA porque los datos de la empresa "
+            "no son correctos:\n\n• " + "\n• ".join(errors) +
+            "\n\nRevísalos en «⚙ SEPA Config».",
+            parent=self.root)
+        self.open_sepa_config()
+        return False
+
+    def _confirm_excluded_rows(self):
+        """Resume las líneas que se quedan fuera del fichero y pide confirmación."""
+        problems = {}
+        for r in self.current_results:
+            status_text, _tag, is_problem, _reason = payment_issue(r)
+            if is_problem:
+                problems.setdefault(status_text, []).append(r['FILENAME'])
+        if not problems:
+            return True
+
+        detail = "\n".join(
+            f"• {status}: {len(files)} → {', '.join(files[:3])}"
+            + (f" y {len(files) - 3} más" if len(files) > 3 else "")
+            for status, files in sorted(problems.items())
+        )
+        total = sum(len(files) for files in problems.values())
+        return messagebox.askyesno(
+            "Líneas que se van a omitir",
+            f"{total} línea(s) no se pueden pagar y quedarán fuera del fichero:\n\n{detail}\n\n"
+            "¿Generar el SEPA XML solo con el resto?",
+            parent=self.root)
+
+    def _confirm_duplicates(self):
+        """Avisa de posibles pagos duplicados (mismo IBAN e importe)."""
+        duplicates = find_duplicate_payments(self.current_results)
+        if not duplicates:
+            return True
+        detail = "\n".join(
+            f"• {rows[0]['NOMBRE']} — {amount:,.2f} € x{len(rows)} ({', '.join(r['FILENAME'] for r in rows)})"
+            .replace(",", "X").replace(".", ",").replace("X", ".")
+            for (_iban, amount), rows in duplicates[:8]
+        )
+        return messagebox.askyesno(
+            "¿Pagos duplicados?",
+            "Hay líneas con el mismo IBAN y el mismo importe, y se pagarían por separado:\n\n"
+            f"{detail}\n\n¿Continuar de todas formas?",
+            parent=self.root)
+
+    def _sepa_checks_ok(self):
+        return self._check_sepa_config() and self._confirm_excluded_rows() and self._confirm_duplicates()
+
     def generate_sepa(self):
         if not self.current_results: return
 
-        # Check for problems
-        problems = [r for r in self.current_results
-                    if r['IBAN'] in ('NO ENCONTRADO', 'AMBIGUO', '')]
-        if problems:
-            resp = messagebox.askyesno(
-                "Atención",
-                f"Hay {len(problems)} registro(s) sin IBAN válido que se omitirán del XML.\n\n"
-                "¿Deseas continuar generando el SEPA XML solo con los registros válidos?")
-            if not resp:
-                return
+        if not self._sepa_checks_ok():
+            return
 
         try:
             exec_date_str = self.sepa_date_var.get().strip()
@@ -1926,16 +2189,24 @@ class RemesaApp:
                 exec_date = datetime.now().strftime("%Y-%m-%d")
             output_file = generate_sepa_xml(self.current_results, self.config, exec_date=exec_date)
             if output_file:
+                paid = [r for r in self.current_results if is_payable(r)]
+                total = f"{sum(r['IMPORTE'] for r in paid):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
                 messagebox.showinfo("SEPA XML Generado",
-                    f"Archivo SEPA generado correctamente:\n{output_file}\n\n"
-                    f"Transacciones incluidas: {len([r for r in self.current_results if r['IBAN'] not in ('NO ENCONTRADO', 'AMBIGUO', '')])}")
+                    f"Archivo SEPA generado correctamente:\n{os.path.abspath(output_file)}\n\n"
+                    f"Transferencias: {len(paid)}\n"
+                    f"Importe total: {total} €\n\n"
+                    "Comprueba que estas dos cifras cuadran al subir el fichero al banco.")
             else:
                 messagebox.showwarning("Aviso", "No hay transacciones válidas para generar el XML.")
+        except SepaConfigError as e:
+            messagebox.showerror("Datos del ordenante incompletos", str(e))
         except Exception as e:
             messagebox.showerror("Error SEPA", f"Error generando XML: {e}")
 
     def preview_sepa(self):
         if not self.current_results:
+            return
+        if not self._check_sepa_config():
             return
         try:
             exec_date_str = self.sepa_date_var.get().strip()
@@ -1963,6 +2234,8 @@ class RemesaApp:
 
             SepaPreviewDialog(self.root, xml_content)
 
+        except SepaConfigError as e:
+            messagebox.showerror("Datos del ordenante incompletos", str(e))
         except Exception as e:
             messagebox.showerror("Error", f"Error generando vista previa: {e}")
 
@@ -2242,13 +2515,14 @@ def generate_remesa_data(folder_path, db_df, progress_callback=None):
             extracted_name, amount, status, ambiguous_candidates = extract_info_from_pdf(filepath, db_df)
         
         iban = ""
-        concept = f"Pago {filename[:20]}..."
+        concept = f"{DEFAULT_CONCEPT} {os.path.splitext(filename)[0]}"
         candidates_list = None
         
         if status.startswith("OK"):
             row = db_df[db_df['NOMBRE'] == extracted_name].iloc[0]
-            iban = row.get('IBAN', '')
-            concept = row.get('CONCEPTO_NORMA', concept)
+            # clean_db_value evita que un NaN de pandas acabe como "nan" en el banco
+            iban = clean_db_value(row.get('IBAN'))
+            concept = clean_db_value(row.get('CONCEPTO_NORMA')) or concept
         elif status == "AMBIGUO":
             extracted_name = "REVISAR: " + extracted_name
             iban = "AMBIGUO"
