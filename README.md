@@ -25,6 +25,9 @@ RemesaPro is a desktop application that automates the processing of expense repo
 - **SEPA XML generation** – Produces valid `pain.001.001.03` credit transfer files ready for bank import
 - **Excel remittance output** – Timestamped Excel file with color-coded status (green = OK, yellow = ambiguous, red = error)
 - **Interactive disambiguation** – GUI dialogs to manually resolve ambiguous matches or edit data
+- **Provider autocomplete** – Start typing a name and the matching providers from the database appear; picking one fills in the IBAN and concepto
+- **In-place table editing** – Double-click any cell to edit name, IBAN, amount or concepto without opening a dialog
+- **Row search and clipboard** – Filter the table by file, provider, IBAN or concepto, and copy/paste cells or whole providers between rows
 - **Auto-update** – Checks GitHub releases for new versions and applies updates automatically
 - **Persistent configuration** – Saves last-used paths and SEPA debtor info to a local JSON file
 
@@ -134,6 +137,9 @@ RemesaPro es una aplicación de escritorio que automatiza el procesamiento de no
 - **Generación de XML SEPA** – Produce ficheros de transferencia de crédito `pain.001.001.03` válidos para importar en el banco
 - **Remesa Excel de salida** – Archivo Excel con marca de tiempo y estado codificado por colores (verde = OK, amarillo = ambiguo, rojo = error)
 - **Desambiguación interactiva** – Diálogos GUI para resolver manualmente coincidencias ambiguas o editar datos
+- **Autocompletado de proveedores** – Al escribir un nombre aparecen los proveedores de la base de datos que coinciden; al elegir uno se rellenan el IBAN y el concepto
+- **Edición directa en la tabla** – Doble clic en cualquier celda para editar nombre, IBAN, importe o concepto sin abrir ninguna ventana
+- **Búsqueda y portapapeles** – Filtra la tabla por archivo, proveedor, IBAN o concepto, y copia/pega celdas o proveedores completos entre filas
 - **Actualización automática** – Comprueba las versiones en GitHub Releases y aplica actualizaciones automáticamente
 - **Configuración persistente** – Guarda las rutas utilizadas y los datos del ordenante SEPA en un archivo JSON local
 
