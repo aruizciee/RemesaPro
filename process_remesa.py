@@ -30,7 +30,17 @@ APP_VERSION = 7  # Matches GitHub build number
 DEFAULT_DB_FILE = "Base datos IBAN proveedores.xlsx"
 TEMPLATE_FILE = "FA25_REMESA PAGOS SANTANDER_.xlsx"
 OUTPUT_PREFIX = "REMESA_GENERADA_"
-DEFAULT_CONCEPT = "NOTA DE GASTOS"  # concepto que ve el proveedor si la BD no tiene uno
+DEFAULT_CONCEPT = "NOTA DE GASTOS"  # texto fijo del concepto si la BD no tiene uno
+CONCEPT_DEFAULTS = {
+    "concepto_defecto": DEFAULT_CONCEPT,          # texto fijo configurable
+    "concepto_incluir_descripcion": True,         # añadir la descripción del archivo
+}
+
+# De dónde viene el concepto de cada línea: solo los escritos a mano se
+# proponen para guardar en la base de datos al generar la remesa.
+CONCEPT_FROM_DB = "bd"
+CONCEPT_AUTO = "auto"
+CONCEPT_MANUAL = "manual"
 CONFIG_FILE = "remesa_config.json"
 SESSION_FILE = "remesa_session.json"
 LOGO_FILE = "ciee logo.png"
@@ -285,6 +295,38 @@ def clean_db_value(value):
     if not text or text.lower() in ("nan", "none", "nat"):
         return ""
     return text
+
+
+def concept_settings(config):
+    """Texto fijo y opciones del concepto por defecto, siempre con valores válidos."""
+    config = config or {}
+    base = clean_db_value(config.get("concepto_defecto")) or DEFAULT_CONCEPT
+    include_description = config.get("concepto_incluir_descripcion",
+                                     CONCEPT_DEFAULTS["concepto_incluir_descripcion"])
+    return base, bool(include_description)
+
+
+def description_from_filename(filename):
+    """Tramo descriptivo de 'FA26_PROVEEDOR_DESCRIPCION.pdf' → 'DESCRIPCION'.
+
+    Devuelve '' si el archivo no sigue ese patrón, para no colar el nombre del
+    proveedor ni el ejercicio en el concepto que ve el banco.
+    """
+    stem = os.path.splitext(os.path.basename(str(filename)))[0]
+    parts = [p.strip() for p in stem.split("_")]
+    if len(parts) < 3:
+        return ""
+    description = " ".join(p for p in parts[2:] if p)
+    return re.sub(r"\s+", " ", description).strip()
+
+
+def build_default_concept(filename, config=None):
+    """Concepto de una línea cuando el proveedor no tiene CONCEPTO_NORMA en la BD."""
+    base, include_description = concept_settings(config)
+    if not include_description:
+        return base
+    description = description_from_filename(filename)
+    return f"{base} {description}".strip() if description else base
 
 
 def find_db_row(db_df, name):
@@ -625,11 +667,11 @@ class AmbiguityResolverDialog(tk.Toplevel):
         self.destroy()
 
 class SepaConfigDialog(tk.Toplevel):
-    """Dialog to configure SEPA debtor (ordenante) details."""
+    """Dialog to configure SEPA debtor (ordenante) details and the default concept."""
     def __init__(self, parent, config, save_callback):
         super().__init__(parent)
-        self.title("Configuración SEPA - Datos del Ordenante")
-        self.geometry("550x400")
+        self.title("Configuración - Ordenante SEPA y concepto")
+        self.geometry("620x560")
         self.save_callback = save_callback
 
         tk.Label(self, text="Datos del Ordenante (Empresa)", font=("Helvetica", 12, "bold")).pack(pady=10)
@@ -657,14 +699,54 @@ class SepaConfigDialog(tk.Toplevel):
             tk.Entry(form, textvariable=var, width=width).grid(row=i, column=1, pady=3, padx=5)
             self.vars[key] = var
 
+        ttk.Separator(self, orient="horizontal").pack(fill=tk.X, padx=20, pady=10)
+
+        tk.Label(self, text="Concepto de los pagos", font=("Helvetica", 12, "bold")).pack()
+
+        concept_frame = tk.Frame(self)
+        concept_frame.pack(fill=tk.X, padx=20, pady=5)
+
+        tk.Label(concept_frame, text="Concepto por defecto:", anchor="w").grid(row=0, column=0, sticky="w", pady=3)
+        base_concept, include_description = concept_settings(config)
+        self.concept_var = tk.StringVar(value=base_concept)
+        tk.Entry(concept_frame, textvariable=self.concept_var, width=45).grid(row=0, column=1, pady=3, padx=5)
+
+        self.concept_desc_var = tk.BooleanVar(value=include_description)
+        tk.Checkbutton(concept_frame, text="Añadir la descripción del archivo (FA26_PROVEEDOR_DESCRIPCIÓN)",
+                       variable=self.concept_desc_var,
+                       command=self._update_concept_preview).grid(row=1, column=0, columnspan=2, sticky="w", pady=3)
+
+        self.lbl_concept_preview = tk.Label(concept_frame, text="", fg="gray", anchor="w", justify="left")
+        self.lbl_concept_preview.grid(row=2, column=0, columnspan=2, sticky="w")
+
+        tk.Label(concept_frame,
+                 text="Solo se usa cuando el proveedor no tiene concepto en la base de datos.",
+                 fg="gray", anchor="w", justify="left").grid(row=3, column=0, columnspan=2, sticky="w", pady=(3, 0))
+
+        self.concept_var.trace_add("write", lambda *_: self._update_concept_preview())
+        self._update_concept_preview()
+
         btn_frame = tk.Frame(self)
         btn_frame.pack(pady=15)
         tk.Button(btn_frame, text="💾 Guardar", command=self.save, bg="#c8e6c9",
                   font=("Helvetica", 10, "bold")).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame, text="Cancelar", command=self.destroy).pack(side=tk.LEFT, padx=5)
 
+    # Ejemplo real con el patrón de nombre de archivo que usa administración
+    PREVIEW_FILENAME = "FA26_ALBERTO RUIZ_Taxi inauguracion.pdf"
+
+    def _update_concept_preview(self):
+        """Muestra cómo quedará el concepto que verá el proveedor en su extracto."""
+        preview = build_default_concept(self.PREVIEW_FILENAME, {
+            "concepto_defecto": self.concept_var.get(),
+            "concepto_incluir_descripcion": self.concept_desc_var.get(),
+        })
+        self.lbl_concept_preview.config(text=f"Ejemplo: «{preview}»")
+
     def save(self):
         result = {key: var.get() for key, var in self.vars.items()}
+        result["concepto_defecto"] = clean_db_value(self.concept_var.get()) or DEFAULT_CONCEPT
+        result["concepto_incluir_descripcion"] = bool(self.concept_desc_var.get())
         if self.save_callback:
             self.save_callback(result)
         self.destroy()
@@ -694,6 +776,7 @@ def generate_sepa_xml(results, config, output_path=None, exec_date=None):
 
     # Get config values with defaults
     cfg = {**SEPA_DEFAULTS, **{k: v for k, v in config.items() if k.startswith("sepa_")}}
+    base_concept, _ = concept_settings(config)
 
     ns = "urn:iso:std:iso:20022:tech:xsd:pain.001.001.03"
     doc = Element("Document", xmlns=ns)
@@ -778,9 +861,9 @@ def generate_sepa_xml(results, config, output_path=None, exec_date=None):
         SubElement(SubElement(cdtr_acct, "Id"), "IBAN").text = iban
 
         rmt = SubElement(tx, "RmtInf")
-        concept = clean_db_value(r.get('CONCEPTO_NORMA')) or DEFAULT_CONCEPT
+        concept = clean_db_value(r.get('CONCEPTO_NORMA')) or base_concept
         # Máximo 140 caracteres, nunca vacío y sin caracteres que el banco rechace
-        SubElement(rmt, "Ustrd").text = sepa_text(concept, 140, fallback=DEFAULT_CONCEPT)
+        SubElement(rmt, "Ustrd").text = sepa_text(concept, 140, fallback=base_concept)
 
     # Write XML
     if output_path is None:
@@ -901,7 +984,10 @@ class EditDialog(tk.Toplevel):
             self.result_data['IMPORTE'] = float(self.amount_var.get().replace(',','.'))
         except (ValueError, TypeError):
             pass
-        self.result_data['CONCEPTO_NORMA'] = self.concepto_var.get()
+        concepto = self.concepto_var.get()
+        if concepto != self.result_data.get('CONCEPTO_NORMA', ''):
+            self.result_data['CONCEPTO_ORIGEN'] = CONCEPT_MANUAL
+        self.result_data['CONCEPTO_NORMA'] = concepto
         
         # Callback to update Treeview
         if self.save_callback:
@@ -1162,7 +1248,7 @@ class RemesaApp:
         self.btn_sepa_preview = ttk.Button(btn_frame, text="🔍 Vista previa XML", command=self.preview_sepa, state="disabled")
         self.btn_sepa_preview.pack(side=tk.LEFT, padx=5)
 
-        ttk.Button(btn_frame, text="⚙ SEPA Config", command=self.open_sepa_config).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="⚙ Configuración", command=self.open_sepa_config).pack(side=tk.LEFT, padx=5)
 
         self.lbl_status = ttk.Label(btn_frame, text="Listo", font=("Helvetica", 9, "italic"))
         self.lbl_status.pack(side=tk.LEFT, padx=15)
@@ -1554,8 +1640,10 @@ class RemesaApp:
             if self.loaded_db_df is not None:
                 match = self.loaded_db_df[self.loaded_db_df['NOMBRE'] == name]
                 if not match.empty:
-                    result_item['CONCEPTO_NORMA'] = (clean_db_value(match.iloc[0].get('CONCEPTO_NORMA'))
-                                                     or result_item['CONCEPTO_NORMA'])
+                    db_concept = clean_db_value(match.iloc[0].get('CONCEPTO_NORMA'))
+                    if db_concept:
+                        result_item['CONCEPTO_NORMA'] = db_concept
+                        result_item['CONCEPTO_ORIGEN'] = CONCEPT_FROM_DB
             
             # Refresh table
             self.refresh_table()
@@ -1624,6 +1712,88 @@ class RemesaApp:
         except Exception as e:
             print(f"Error saving DB entry: {e}")
 
+    # ── Conceptos escritos a mano → base de datos ────────────────────────
+    def _pending_concept_updates(self):
+        """Conceptos escritos a mano que todavía no están en la base de datos.
+
+        Devuelve [(nombre_en_bd, concepto_nuevo, concepto_actual)]. Los conceptos
+        automáticos no entran: solo se guarda lo que ha escrito el usuario.
+        """
+        if self.loaded_db_df is None or 'NOMBRE' not in getattr(self.loaded_db_df, 'columns', []):
+            return []
+
+        updates = {}
+        for r in self.current_results:
+            if r.get('CONCEPTO_ORIGEN') != CONCEPT_MANUAL:
+                continue
+            concepto = clean_db_value(r.get('CONCEPTO_NORMA'))
+            nombre = clean_db_value(r.get('NOMBRE'))
+            if not concepto or not nombre:
+                continue
+            row = find_db_row(self.loaded_db_df, nombre)
+            if row is None:
+                continue  # proveedor que no está en la BD: se añade desde el diálogo de edición
+            actual = clean_db_value(row.get('CONCEPTO_NORMA'))
+            if actual == concepto:
+                continue
+            # La última línea editada de un mismo proveedor es la que manda
+            updates[normalize_text(nombre)] = (clean_db_value(row.get('NOMBRE')), concepto, actual)
+        return list(updates.values())
+
+    def _confirm_concept_updates(self, updates):
+        detail = "\n".join(
+            f"• {nombre}: {actual or '(vacío)'} → {concepto}"
+            for nombre, concepto, actual in updates[:12]
+        )
+        if len(updates) > 12:
+            detail += f"\n… y {len(updates) - 12} más"
+        return messagebox.askyesno(
+            "Guardar conceptos en la base de datos",
+            f"Has escrito el concepto de {len(updates)} proveedor(es).\n\n{detail}\n\n"
+            "¿Guardarlos en la base de datos para usarlos en las próximas remesas?",
+            parent=self.root)
+
+    def _write_concepts_to_db(self, updates):
+        """Escribe CONCEPTO_NORMA en el Excel de la BD. Devuelve True si se guardó."""
+        df = self.loaded_db_df
+        if 'CONCEPTO_NORMA' not in df.columns:
+            df['CONCEPTO_NORMA'] = ""
+
+        nombres = df['NOMBRE'].map(lambda n: normalize_text(clean_db_value(n)))
+        for nombre, concepto, _actual in updates:
+            df.loc[nombres == normalize_text(nombre), 'CONCEPTO_NORMA'] = concepto
+
+        db_path = self.db_var.get()
+        try:
+            df.to_excel(db_path, index=False)
+            return True
+        except PermissionError:
+            messagebox.showwarning(
+                "Base de datos abierta",
+                "No se han podido guardar los conceptos porque el Excel de la base de datos "
+                "está abierto. Ciérralo y vuelve a generar la remesa si quieres guardarlos.",
+                parent=self.root)
+        except Exception as e:
+            messagebox.showerror("Error BD", f"Error al guardar los conceptos en la BD: {e}",
+                                 parent=self.root)
+        return False
+
+    def store_manual_concepts(self):
+        """Tras generar el SEPA, ofrece guardar los conceptos escritos a mano."""
+        updates = self._pending_concept_updates()
+        if not updates:
+            return
+        if not self._confirm_concept_updates(updates):
+            return
+        if not self._write_concepts_to_db(updates):
+            return
+
+        guardados = {normalize_text(nombre) for nombre, _c, _a in updates}
+        for r in self.current_results:
+            if normalize_text(clean_db_value(r.get('NOMBRE'))) in guardados:
+                r['CONCEPTO_ORIGEN'] = CONCEPT_FROM_DB
+        self.lbl_status.config(text=f"{len(updates)} concepto(s) guardado(s) en la base de datos.")
+
     def start_processing_thread(self):
         self.btn_process.config(state="disabled")
         self.btn_save.config(state="disabled")
@@ -1662,7 +1832,8 @@ class RemesaApp:
             def progress_cb(current, total):
                 self.root.after(0, lambda c=current, t=total: self._update_progress(c, t))
 
-            self.current_results = generate_remesa_data(folder, self.loaded_db_df, progress_cb)
+            self.current_results = generate_remesa_data(folder, self.loaded_db_df, progress_cb,
+                                                        config=self.config)
             self.root.after(0, self.refresh_table)
 
         except Exception as e:
@@ -1825,6 +1996,7 @@ class RemesaApp:
         concepto = clean_db_value(row.get('CONCEPTO_NORMA'))
         if concepto:
             record['CONCEPTO_NORMA'] = concepto
+            record['CONCEPTO_ORIGEN'] = CONCEPT_FROM_DB
         return True
 
     # ── Edición en línea ─────────────────────────────────────────────────
@@ -1876,6 +2048,7 @@ class RemesaApp:
             if value == record.get('CONCEPTO_NORMA', ''):
                 return False
             record['CONCEPTO_NORMA'] = value
+            record['CONCEPTO_ORIGEN'] = CONCEPT_MANUAL
             return True
 
         return False
@@ -2072,6 +2245,7 @@ class RemesaApp:
             'NOMBRE': record['NOMBRE'],
             'IBAN': record['IBAN'],
             'CONCEPTO_NORMA': record.get('CONCEPTO_NORMA', ''),
+            'CONCEPTO_ORIGEN': record.get('CONCEPTO_ORIGEN', CONCEPT_AUTO),
         }
         self._clipboard_set("\t".join([
             self._provider_clipboard['NOMBRE'],
@@ -2105,6 +2279,7 @@ class RemesaApp:
             record['IBAN'] = provider['IBAN']
             if provider.get('CONCEPTO_NORMA'):
                 record['CONCEPTO_NORMA'] = provider['CONCEPTO_NORMA']
+                record['CONCEPTO_ORIGEN'] = provider.get('CONCEPTO_ORIGEN', CONCEPT_MANUAL)
             record['AMBIGUOUS_CANDIDATES'] = None
         self.refresh_table()
         self._select_indices(indices)
@@ -2129,7 +2304,7 @@ class RemesaApp:
             "Datos del ordenante incompletos",
             "No se puede generar el fichero SEPA porque los datos de la empresa "
             "no son correctos:\n\n• " + "\n• ".join(errors) +
-            "\n\nRevísalos en «⚙ SEPA Config».",
+            "\n\nRevísalos en «⚙ Configuración».",
             parent=self.root)
         self.open_sepa_config()
         return False
@@ -2196,6 +2371,7 @@ class RemesaApp:
                     f"Transferencias: {len(paid)}\n"
                     f"Importe total: {total} €\n\n"
                     "Comprueba que estas dos cifras cuadran al subir el fichero al banco.")
+                self.store_manual_concepts()
             else:
                 messagebox.showwarning("Aviso", "No hay transacciones válidas para generar el XML.")
         except SepaConfigError as e:
@@ -2243,7 +2419,7 @@ class RemesaApp:
         def on_save(sepa_data):
             self.config.update(sepa_data)
             self.save_config()
-            messagebox.showinfo("Config SEPA", "Configuración SEPA guardada.")
+            messagebox.showinfo("Configuración", "Configuración guardada.")
 
         SepaConfigDialog(self.root, self.config, on_save)
 
@@ -2498,7 +2674,7 @@ def find_best_match(name_from_file, db_names, db_df=None, pdf_text=""):
                      break
         return final_name, status, ambiguous_candidates
 
-def generate_remesa_data(folder_path, db_df, progress_callback=None):
+def generate_remesa_data(folder_path, db_df, progress_callback=None, config=None):
     results = []
     files = [f for f in os.listdir(folder_path)
              if f.lower().endswith('.pdf') or f.lower().endswith('.xlsx')]
@@ -2515,14 +2691,18 @@ def generate_remesa_data(folder_path, db_df, progress_callback=None):
             extracted_name, amount, status, ambiguous_candidates = extract_info_from_pdf(filepath, db_df)
         
         iban = ""
-        concept = f"{DEFAULT_CONCEPT} {os.path.splitext(filename)[0]}"
+        concept = build_default_concept(filename, config)
+        concept_origin = CONCEPT_AUTO
         candidates_list = None
         
         if status.startswith("OK"):
             row = db_df[db_df['NOMBRE'] == extracted_name].iloc[0]
             # clean_db_value evita que un NaN de pandas acabe como "nan" en el banco
             iban = clean_db_value(row.get('IBAN'))
-            concept = clean_db_value(row.get('CONCEPTO_NORMA')) or concept
+            db_concept = clean_db_value(row.get('CONCEPTO_NORMA'))
+            if db_concept:
+                concept = db_concept
+                concept_origin = CONCEPT_FROM_DB
         elif status == "AMBIGUO":
             extracted_name = "REVISAR: " + extracted_name
             iban = "AMBIGUO"
@@ -2540,6 +2720,7 @@ def generate_remesa_data(folder_path, db_df, progress_callback=None):
             'IBAN': iban,
             'IMPORTE': amount,
             'CONCEPTO_NORMA': concept,
+            'CONCEPTO_ORIGEN': concept_origin,
             'AMBIGUOUS_CANDIDATES': candidates_list
         })
     return results

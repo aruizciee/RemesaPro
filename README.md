@@ -29,6 +29,8 @@ RemesaPro is a desktop application that automates the processing of expense repo
 - **Provider autocomplete** – Start typing a name and the matching providers from the database appear; picking one fills in the IBAN and concepto
 - **In-place table editing** – Double-click any cell to edit name, IBAN, amount or concepto without opening a dialog
 - **Row search and clipboard** – Filter the table by file, provider, IBAN or concepto, and copy/paste cells or whole providers between rows
+- **Configurable default concepto** – Set the fixed text used when a provider has no `CONCEPTO_NORMA` in the database (optionally followed by the description taken from the file name), under **⚙ Configuración**
+- **Concepto learning** – After generating the SEPA file, the conceptos you typed by hand are offered for saving into the provider database, so the next remittance reuses them
 - **Auto-update** – Checks GitHub releases for new versions and applies updates automatically
 - **Persistent configuration** – Saves last-used paths and SEPA debtor info to a local JSON file
 
@@ -147,6 +149,8 @@ The file `Base datos IBAN proveedores.xlsx` must contain these columns:
 | `IBAN` | Provider's bank IBAN |
 | `CONCEPTO_NORMA` | Payment description/concept |
 
+If `CONCEPTO_NORMA` is empty (or the column is missing), the concepto configured under **⚙ Configuración** is used instead — the fixed text plus, optionally, the description read from the file name (`FA26_PROVIDER_DESCRIPTION.pdf` → `DESCRIPTION`). Conceptos you type by hand in the table can be written back to this column after generating the SEPA file.
+
 ---
 
 ## Español
@@ -167,6 +171,8 @@ RemesaPro es una aplicación de escritorio que automatiza el procesamiento de no
 - **Autocompletado de proveedores** – Al escribir un nombre aparecen los proveedores de la base de datos que coinciden; al elegir uno se rellenan el IBAN y el concepto
 - **Edición directa en la tabla** – Doble clic en cualquier celda para editar nombre, IBAN, importe o concepto sin abrir ninguna ventana
 - **Búsqueda y portapapeles** – Filtra la tabla por archivo, proveedor, IBAN o concepto, y copia/pega celdas o proveedores completos entre filas
+- **Concepto por defecto configurable** – En **⚙ Configuración** se define el texto fijo que se usa cuando el proveedor no tiene `CONCEPTO_NORMA` en la base de datos, con la opción de añadir la descripción del nombre del archivo
+- **Los conceptos se aprenden** – Al generar el fichero SEPA, los conceptos que has escrito a mano se ofrecen para guardarlos en la base de datos de proveedores y reutilizarlos en las siguientes remesas
 - **Actualización automática** – Comprueba las versiones en GitHub Releases y aplica actualizaciones automáticamente
 - **Configuración persistente** – Guarda las rutas utilizadas y los datos del ordenante SEPA en un archivo JSON local
 
@@ -284,6 +290,8 @@ El archivo `Base datos IBAN proveedores.xlsx` debe contener estas columnas:
 | `NOMBRE` | Nombre completo del proveedor |
 | `IBAN` | IBAN bancario del proveedor |
 | `CONCEPTO_NORMA` | Descripción / concepto del pago |
+
+Si `CONCEPTO_NORMA` está vacío (o falta la columna), se usa el concepto definido en **⚙ Configuración**: el texto fijo y, si está marcada la opción, la descripción que se lee del nombre del archivo (`FA26_PROVEEDOR_DESCRIPCION.pdf` → `DESCRIPCION`). Los conceptos que escribas a mano en la tabla se pueden guardar en esta columna al generar el fichero SEPA.
 
 ---
 
