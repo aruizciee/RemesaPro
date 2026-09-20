@@ -68,10 +68,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller pandas pypdf openpyxl
 
+      # PyInstaller necesita un .icns en macOS; se genera desde icon.png con
+      # las herramientas del sistema (sips/iconutil), sin dependencias extra.
+      - name: Preparar icono .icns
+        run: |
+          mkdir -p RemesaPro.iconset
+          for size in 16 32 128 256 512; do
+            sips -z $size $size icon.png --out "RemesaPro.iconset/icon_${size}x${size}.png"
+            sips -z $((size * 2)) $((size * 2)) icon.png --out "RemesaPro.iconset/icon_${size}x${size}@2x.png"
+          done
+          iconutil -c icns RemesaPro.iconset -o RemesaPro.icns
+
       - name: Compilar .app con PyInstaller
         run: |
           pyinstaller --onefile --windowed \
+            --icon RemesaPro.icns \
             --add-data "ciee logo.png:." \
+            --add-data "icon.png:." \
             --name RemesaPro \
             process_remesa.py
 
