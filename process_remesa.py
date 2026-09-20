@@ -19,8 +19,13 @@ from xml.etree.ElementTree import Element, SubElement, ElementTree, indent
 import ssl
 
 # Pre-compiled regex patterns
-_RE_DECIMAL_AMOUNT = re.compile(r"(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})")
-_RE_THOUSANDS_NODEC = re.compile(r"\b(\d{1,3}(?:\.\d{3})+)\b")  # e.g. "1.256" → 1256
+# Importe con decimales: "1.234,56" / "1,234.56" / "28,92".
+# Los límites (?<![\d.,]) y (?!\d) evitan cortar un número por la mitad:
+# sin ellos "1.998 €" (mil novecientos noventa y ocho) se leía como "1.99".
+_RE_DECIMAL_AMOUNT = re.compile(r"(?<![\d.,])(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})(?!\d)")
+# Solo miles, sin parte decimal: "1.256" → 1256. El (?![.,]?\d) evita que
+# "1.234,56" genere además un candidato erróneo de 1234.
+_RE_THOUSANDS_NODEC = re.compile(r"(?<![\d.,])(\d{1,3}(?:\.\d{3})+)(?![.,]?\d)")
 _RE_WHOLE_EURO = re.compile(r"(\d+)\s*€")
 _RE_NOMBRE = re.compile(r"[Nn]ombre:\s*(.+)")
 
@@ -2540,23 +2545,26 @@ def extract_info_from_pdf(pdf_path, db_df):
         )
 
         # 1. Amount — use pre-compiled regex
+        # Cada candidato es (posición, valor, longitud del texto capturado):
+        # si dos patrones casan en la misma posición gana el más largo, que es
+        # el que abarca el número completo.
         amount = 0.0
         candidates = []
         for m in _RE_DECIMAL_AMOUNT.finditer(text):
             try:
-                candidates.append((m.start(), parse_amount(m.group(1))))
+                candidates.append((m.start(), parse_amount(m.group(1)), len(m.group(1))))
             except (ValueError, TypeError):
                 pass
         # Thousands-only format: "1.256" → 1256 (European, no decimal part)
         for m in _RE_THOUSANDS_NODEC.finditer(text):
             try:
                 val = float(m.group(1).replace('.', ''))
-                candidates.append((m.start(), val))
+                candidates.append((m.start(), val, len(m.group(1))))
             except (ValueError, TypeError):
                 pass
         for m in _RE_WHOLE_EURO.finditer(text):
             try:
-                candidates.append((m.start(), float(m.group(1))))
+                candidates.append((m.start(), float(m.group(1)), len(m.group(1))))
             except (ValueError, TypeError):
                 pass
 
@@ -2572,10 +2580,15 @@ def extract_info_from_pdf(pdf_path, db_df):
         if total_idx != -1:
             closest_val = None
             min_dist = 1000
-            for start, val in candidates:
+            best_len = 0
+            for start, val, length in candidates:
                 dist = start - total_idx
-                if 0 < dist < 200 and dist < min_dist:
+                if not (0 < dist < 200):
+                    continue
+                # Más cercano a la etiqueta; a igual distancia, la captura más larga
+                if dist < min_dist or (dist == min_dist and length > best_len):
                     min_dist = dist
+                    best_len = length
                     closest_val = val
             amount = closest_val if closest_val is not None else (max([c[1] for c in candidates]) if candidates else 0.0)
         else:
